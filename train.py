@@ -22,8 +22,6 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from diffusers import DDPMScheduler
 from diffusers.optimization import get_scheduler
-from huggingface_hub import HfFolder, Repository, whoami
-from PIL import Image
 from tqdm.auto import tqdm
 
 from torch.utils.tensorboard import SummaryWriter
@@ -34,15 +32,6 @@ from utils.parse_args import parse_args
 from datasets.dreamct_dataset import CTFramesDataset
 from pipelines.dual_encoder_pipeline import StableDiffusionCT2CTPipeline
 from models.unet_dual_encoder import *
-
-def get_full_repo_name(model_id: str, organization: Optional[str] = None, token: Optional[str] = None):
-    if token is None:
-        token = HfFolder.get_token()
-    if organization is None:
-        username = whoami(token)["name"]
-        return f"{username}/{model_id}"
-    else:
-        return f"{organization}/{model_id}"
 
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
@@ -74,11 +63,6 @@ def main(args):
                     gitignore.write("epoch_*\n")
         elif args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-    # # Load CLIP Image Encoder
-    # clip_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32").cuda()
-    # clip_encoder.requires_grad_(False)
-    # clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     
     # Load text encoder
     text_encoder, tokenizer = load_text_encoder(args.pretrained_model_name_or_path)
@@ -91,30 +75,8 @@ def main(args):
     # Load pretrained UNet layers
     unet = get_unet(args.pretrained_model_name_or_path)
 
-    if args.custom_chkpt is not None:
-        print("Loading ", args.custom_chkpt)
-        unet_state_dict = torch.load(args.custom_chkpt)
-        new_state_dict = OrderedDict()
-        for k, v in unet_state_dict.items():
-            name = k[7:] if k[:7] == 'module' else k 
-            new_state_dict[name] = v
-        unet.load_state_dict(new_state_dict)
-        unet = unet.cuda()
-
     # Embedding adapter
     adapter = Embedding_Adapter(num_vaes=args.preframe_num)
-
-    if args.custom_chkpt is not None:
-        adapter_chkpt = args.custom_chkpt.replace('unet_epoch', 'adapter')
-        print("Loading ", adapter_chkpt)
-        adapter_state_dict = torch.load(adapter_chkpt)
-        new_state_dict = OrderedDict()
-        for k, v in adapter_state_dict.items():
-            name = k[7:] if k[:7] == 'module' else k 
-            new_state_dict[name] = v
-        adapter.load_state_dict(new_state_dict)
-        adapter = adapter.cuda()
-
     #adapter.requires_grad_(True)
 
     vae.requires_grad_(False)
@@ -128,17 +90,17 @@ def main(args):
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
-    # # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    # if args.use_8bit_adam:
-    #     try:
-    #         import bitsandbytes as bnb
-    #     except ImportError:
-    #         raise ImportError(
-    #             "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-    #         )
+#     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
+#     if args.use_8bit_adam:
+#         try:
+#             import bitsandbytes as bnb
+#         except ImportError:
+#             raise ImportError(
+#                 "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
+#             )
 
-    #     optimizer_class = bnb.optim.AdamW8bit
-    # else:
+#         optimizer_class = bnb.optim.AdamW8bit
+#     else:
     optimizer_class = torch.optim.AdamW
 
     params_to_optimize = (
@@ -157,7 +119,10 @@ def main(args):
     train_dataset = CTFramesDataset(ct_data_root=args.ct_data_dir, frame_num=args.preframe_num)
 
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.train_batch_size, shuffle=True, num_workers=4
+        train_dataset,
+        batch_size=args.train_batch_size,
+        shuffle=True,
+        num_workers=np.min([args.train_batch_size, 4])
     )
 
     # Scheduler and math around the number of training steps.
@@ -178,7 +143,27 @@ def main(args):
     unet, adapter, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         unet, adapter, optimizer, train_dataloader, lr_scheduler
     )
-
+    
+    if args.custom_chkpt is not None:
+        print("Loading ", args.custom_chkpt)
+        unet_state_dict = torch.load(args.custom_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in unet_state_dict.items():
+            # name = k[7:] if k[:7] == 'module.' else k 
+            new_state_dict[k] = v
+        unet.load_state_dict(new_state_dict)
+        
+        adapter_chkpt = args.custom_chkpt.replace('unet_epoch', 'adapter')
+        print("Loading ", adapter_chkpt)
+        adapter_state_dict = torch.load(adapter_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in adapter_state_dict.items():
+            # name = k[7:] if k[:7] == 'module.' else k
+            new_state_dict[k] = v
+        adapter.load_state_dict(new_state_dict)
+        
+     
+    
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -204,7 +189,7 @@ def main(args):
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
+    
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
@@ -213,6 +198,16 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    
+    print("***** Running training *****")
+    print(f"  Num examples = {len(train_dataset)}")
+    print(f"  Num batches each epoch = {len(train_dataloader)}")
+    print(f"  Num Epochs = {args.num_train_epochs}")
+    print(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    print(f"  Num accelerator processes = {accelerator.num_processes}")
+    print(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    print(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    print(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     
@@ -241,6 +236,7 @@ def main(args):
             # if first_batch and latest_chkpt_step is not None:
             #     #os.system(f"python test_img2img.py --step {latest_chkpt_step} --strength 0.8")
             #     first_batch = False
+            progress_bar.set_description(f"[start]Steps {global_step}")
             with accelerator.accumulate(unet):
                 # batch[0]: frame data
                 # batch[1]: properties
@@ -325,15 +321,16 @@ def main(args):
                 optimizer.zero_grad()
 
             # write to tensorboard
-            if global_step % 10 == 0:
-                weights = adapter.linear1.weight.cpu().detach().numpy()
-                weights = np.sum(weights, axis=0)
-                weights = weights.flatten()
-                plt.figure()
-                plt.plot(range(len(weights)), weights)
-                plt.title(f"VAE Weights = {weights[50:]}")
-                #plt.hist(weights)
-                writer.add_figure('embedding_weights', plt.gcf(), global_step=global_step)
+            progress_bar.set_description(f"[post]Steps {global_step}")
+            # if global_step % 10 == 0:
+            #     weights = adapter.linear1.weight.cpu().detach().numpy()
+            #     weights = np.sum(weights, axis=0)
+            #     weights = weights.flatten()
+            #     plt.figure()
+            #     plt.plot(range(len(weights)), weights)
+            #     plt.title(f"VAE Weights = {weights[50:]}")
+            #     #plt.hist(weights)
+            #     writer.add_figure('embedding_weights', plt.gcf(), global_step=global_step)
 
             writer.add_scalar("loss/train", loss.detach().item(), global_step)
             if global_step % 50 == 0:
@@ -358,14 +355,12 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-            
-            progress_bar.set_description(f"Epoch {epoch}/{args.num_train_epochs}|Steps {global_step}")
 
             if global_step >= args.max_train_steps:
                 break
 
             # save model
-            if accelerator.is_main_process and global_step % 500 == 1:
+            if accelerator.is_main_process and global_step % 500 == 0:
                 pipeline = StableDiffusionCT2CTPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     vae=accelerator.unwrap_model(vae),
@@ -379,7 +374,7 @@ def main(args):
                 torch.save(unet.state_dict(), model_path)
                 adapter_path = os.path.join(args.output_dir, f'adapter_{epoch}.pth')
                 torch.save(adapter.state_dict(), adapter_path)
-
+            progress_bar.set_description(f"[end_loop]Steps {global_step}")
         accelerator.wait_for_everyone()
 
     accelerator.end_training()

@@ -5,11 +5,12 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from functools import lru_cache
+from collections import OrderedDict
 import random
 from concurrent.futures import ThreadPoolExecutor
 import time
 from einops import rearrange
+import gc
 
 '''
 读取CT切片数据
@@ -40,13 +41,16 @@ class CTFramesDataset(Dataset):
         ct_data_root,
         slice_size=512, # 切片重采样大小
         frame_num=3+1, # 读取的切片数(3帧预测1帧)
-        skip_rate= 0.0, # 跳过的概率
+        skip_rate= 0.5, # 跳过的概率
         train=True,
+        cache_size=4,  # 缓存大小
     ):
         self.ct_data_root = Path(ct_data_root)
         self.slice_size = slice_size
         self.train = train
         self.frame_num = frame_num
+        self.cache_size = cache_size
+        self.cache = OrderedDict()  # 使用OrderedDict作为缓存
 
         ct_npzs = list(self.ct_data_root.glob('*.npz'))
         self.data_idx_buffer = []
@@ -57,11 +61,11 @@ class CTFramesDataset(Dataset):
             pbar.set_postfix_str(f" {len(self.data_idx_buffer)}")
             
             sub_idx_buffer = []
-            ct = self.load_data(ct_npz)
-            ct_meta = ct['meta'].item()
+            ct = self.load_data(ct_npz, meta_only=True)
+
             for plane in ['hor_slices', 'sag_slices', 'cor_slices']:
                 try:
-                    end_idx = ct_meta[plane+'_num']-frame_num
+                    end_idx = ct['meta'][plane+'_num']-frame_num
                 except KeyError:
                     end_idx = ct[plane].shape[0]-frame_num
                 for i in range(0, end_idx):
@@ -71,10 +75,27 @@ class CTFramesDataset(Dataset):
             
             self.data_idx_buffer.extend(sub_idx_buffer)
                 
-    @staticmethod
-    @lru_cache(maxsize=256)
-    def load_data(ct_npz_path):
-        return np.load(ct_npz_path, allow_pickle=True)
+    def load_data(self, ct_npz_path, meta_only=False):
+        if ct_npz_path in self.cache:
+            # 如果数据已经在缓存中，直接返回
+            return self.cache[ct_npz_path]
+        else:
+            # 加载数据并添加到缓存
+            npz_data = np.load(ct_npz_path, allow_pickle=True)
+            data = {
+                'meta': npz_data['meta'].item(),
+            }
+            if meta_only:
+                return data
+            data['hor_slices'] = npz_data['hor_slices'][:]
+            data['sag_slices'] = npz_data['sag_slices'][:]
+            data['cor_slices'] = npz_data['cor_slices'][:]
+            self.cache[ct_npz_path] = data
+            # 如果缓存超过了指定大小，移除最旧的条目
+            if len(self.cache) > self.cache_size:
+                self.cache.popitem(last=False)  # FIFO order
+                gc.collect()
+            return data
     
     def age_description(self, age, digit=False):
         if digit:
@@ -127,14 +148,15 @@ class CTFramesDataset(Dataset):
             'L': 'Lumbar',
             'S': 'Sacrum',
         }
-        tag = str(spine[0])
-        if tag in spine_mapping:
+        try:
+            tag = spine[0]
             name = spine_mapping[tag]
             if spine[1] == '0':
                 return name
             else:
                 return name + '-' + spine[1:]
-        return spine
+        except:
+            return spine
 
     def list_to_natural_language(self, lst):
         if not lst:
@@ -203,72 +225,36 @@ class CTFramesDataset(Dataset):
         ct = self.load_data(ct_npz)
         slices = ct[plane]
         
-        ct_meta = ct['meta'].item()
-        sm_ch = ct_meta['spine_marker_channel']
+        sm_ch = ct['meta']['spine_marker_channel']
         
         properties = {
         'plane': plane[:-7], 
         'positive_order': random.choice([True, False]), 
         'spines': '',
-        'age': ct_meta['age'],
-        'gender': ct_meta['gender'],
+        'age': ct['meta']['age'],
+        'gender': ct['meta']['gender'],
         'original_sizes': slices[0].shape[:2]
         }
-        # 读取切片
-        frames = np.ones((self.frame_num, self.slice_size, self.slice_size, 4), dtype=np.float32) * -1
         
-        for i in range(start_idx, start_idx+self.frame_num):
-            slice_img = slices[i]            
-            # 缩放图像
-            resized_img = self.resize_slice(slice_img, (self.slice_size, self.slice_size))
-            frames[i-start_idx] = resized_img
-            
-        # 随机正序或倒序
+        # 假设slices是一个NumPy数组，形状为[切片数量, 高度, 宽度, 通道数]
+        all_slices = torch.from_numpy(slices[start_idx:start_idx+self.frame_num]).to(torch.float32)  # 转换为torch张量
+        all_slices = all_slices.permute(0, 3, 1, 2)  # 重排维度为[B, C, H, W]
+
+        # 使用interpolate进行一次性插值，假设self.slice_size是目标大小
+        frames = F.interpolate(all_slices, size=(self.slice_size, self.slice_size), mode='bilinear', align_corners=False)
+        
         if not properties['positive_order']:
-            frames[:] = frames[::-1]
+            frames = frames.flip(0)  # 翻转顺序
         
         # 获取存在的脊柱tag
         obj_tags = []
-        for obj_tag, index_value in ct_meta['spine_marker'].items():
+        for obj_tag, index_value in ct['meta']['spine_marker'].items():
             if index_value in frames[-1,:,:,sm_ch]:
                 obj_tags.append(obj_tag)
                 properties['spines'] = '|'.join(obj_tags)
         properties['sentence'] = self.dict_to_sentence(properties)
-        frames = rearrange(frames, 't h w c -> t c h w')
-        return (frames, properties)
-    
-    @staticmethod
-    def resize_slice(slice_img, target_size):
-        # 计算缩放比例
-        original_height, original_width = slice_img.shape[:2]
-        target_height, target_width = target_size
-        scale_x = target_width / original_width
-        scale_y = target_height / original_height
 
-        # 创建目标图像数组
-        resized_img = np.ones((target_height, target_width, slice_img.shape[2]), dtype=np.float32) * -1
-
-        for y in range(target_height):
-            for x in range(target_width):
-                # 计算原始图像中的坐标
-                orig_x = x / scale_x
-                orig_y = y / scale_y
-
-                x_floor = np.floor(orig_x).astype(int)
-                x_ceil = min(x_floor + 1, original_width - 1)
-                y_floor = np.floor(orig_y).astype(int)
-                y_ceil = min(y_floor + 1, original_height - 1)
-
-                # 计算双线性插值
-                bl = slice_img[y_floor, x_floor] * (x_ceil - orig_x) * (y_ceil - orig_y)
-                br = slice_img[y_floor, x_ceil] * (orig_x - x_floor) * (y_ceil - orig_y)
-                tl = slice_img[y_ceil, x_floor] * (x_ceil - orig_x) * (orig_y - y_floor)
-                tr = slice_img[y_ceil, x_ceil] * (orig_x - x_floor) * (orig_y - y_floor)
-
-                # 叠加计算得到的值
-                resized_img[y, x] = bl + br + tl + tr
-
-        return resized_img
+        return frames, properties
     
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
