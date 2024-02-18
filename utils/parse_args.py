@@ -131,7 +131,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--logging_dir",
         type=str,
-        default="logs",
+        default="/root/tf-logs/",
         help=(
             "[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to"
             " *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."

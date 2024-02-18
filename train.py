@@ -34,8 +34,8 @@ from pipelines.dual_encoder_pipeline import StableDiffusionCT2CTPipeline
 from models.unet_dual_encoder import *
 
 def main(args):
-    logging_dir = Path(args.output_dir, args.logging_dir)
-    writer = SummaryWriter(os.path.join(args.output_dir, args.logging_dir, args.run_name))
+    logging_dir = Path(args.logging_dir)
+    writer = SummaryWriter(os.path.join(args.logging_dir, args.run_name))
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -80,10 +80,18 @@ def main(args):
     #adapter.requires_grad_(True)
 
     vae.requires_grad_(False)
+    vae_trainable_params = []
+    for name, param in vae.named_parameters():
+        if 'decoder' in name:
+            param.requires_grad = True
+            vae_trainable_params.append(param)
 
+    print(f"VAE total params = {len(list(vae.named_parameters()))}, trainable params = {len(vae_trainable_params)}")
+    
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         adapter.enable_gradient_checkpointing()
+        vae.gradient_checkpointing_enable()
 
     if args.scale_lr:
         args.learning_rate = (
@@ -104,7 +112,7 @@ def main(args):
     optimizer_class = torch.optim.AdamW
 
     params_to_optimize = (
-        itertools.chain(unet.parameters(), adapter.parameters(),)
+        itertools.chain(unet.parameters(), adapter.parameters(), vae_trainable_params)
     )
 
     optimizer = optimizer_class(
@@ -122,7 +130,7 @@ def main(args):
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        num_workers=np.min([args.train_batch_size, 4])
+        num_workers=np.min([args.train_batch_size, 8])
     )
 
     # Scheduler and math around the number of training steps.
@@ -143,17 +151,9 @@ def main(args):
     unet, adapter, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         unet, adapter, optimizer, train_dataloader, lr_scheduler
     )
-    
-    if args.custom_chkpt is not None:
-        print("Loading ", args.custom_chkpt)
-        unet_state_dict = torch.load(args.custom_chkpt, map_location="cpu")
-        new_state_dict = OrderedDict()
-        for k, v in unet_state_dict.items():
-            # name = k[7:] if k[:7] == 'module.' else k 
-            new_state_dict[k] = v
-        unet.load_state_dict(new_state_dict)
-        
-        adapter_chkpt = args.custom_chkpt.replace('unet_epoch', 'adapter')
+
+    adapter_chkpt = os.path.join(args.pretrained_model_name_or_path, 'adapter.pth')
+    if os.path.exists(adapter_chkpt):
         print("Loading ", adapter_chkpt)
         adapter_state_dict = torch.load(adapter_chkpt, map_location="cpu")
         new_state_dict = OrderedDict()
@@ -161,9 +161,25 @@ def main(args):
             # name = k[7:] if k[:7] == 'module.' else k
             new_state_dict[k] = v
         adapter.load_state_dict(new_state_dict)
+    unet_chkpt = os.path.join(args.pretrained_model_name_or_path, 'unet.pth')
+    if os.path.exists(unet_chkpt):
+        print("Loading ", unet_chkpt)
+        unet_state_dict = torch.load(unet_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in unet_state_dict.items():
+            # name = k[7:] if k[:7] == 'module.' else k 
+            new_state_dict[k] = v
+        unet.load_state_dict(new_state_dict)
+    vae_chkpt = os.path.join(args.pretrained_model_name_or_path, 'vae.pth')
+    if os.path.exists(vae_chkpt):
+        print("Loading ", vae_chkpt)
+        vae_state_dict = torch.load(vae_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in vae_state_dict.items():
+            # name = k[7:] if k[:7] == 'module.' else k 
+            new_state_dict[k] = v
+        vae.load_state_dict(new_state_dict)
         
-     
-    
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -231,12 +247,13 @@ def main(args):
     for epoch in range(args.epoch, args.num_train_epochs):
         unet.train()
         adapter.train()
-        # first_batch = True
+        vae.train()
+        first_batch = True
         for batch in train_dataloader:
             # if first_batch and latest_chkpt_step is not None:
             #     #os.system(f"python test_img2img.py --step {latest_chkpt_step} --strength 0.8")
             #     first_batch = False
-            progress_bar.set_description(f"[start]Steps {global_step}")
+            # progress_bar.set_description(f"[start]Steps {global_step}")
             with accelerator.accumulate(unet):
                 # batch[0]: frame data
                 # batch[1]: properties
@@ -248,6 +265,19 @@ def main(args):
                 target_latents = vae.encode(target_frames[:, :3].to(dtype=weight_dtype)).latent_dist.sample()
                 target_latents = target_latents * 0.18215
 
+                pred_latents = 1 / 0.18215 * target_latents
+                pred_frames = vae.decode(pred_latents).sample
+                pred_frames = pred_frames.clamp(-1, 1)
+
+                vae_loss = F.mse_loss(pred_frames.float(), target_frames[:, :3].clamp(-1, 1).float(), reduction="mean")
+
+                # for i in range(batch[0].shape[1]-1):
+                #     w = (batch[0].shape[1]-i-1) * 0.01
+                #     gap_latents = vae.encode(batch[0][:,i][:, :3].to(dtype=weight_dtype)).latent_dist.sample()
+                #     gap_pred_frames = vae.decode(pred_latents).sample
+                #     gap_pred_frames = gap_pred_frames.clamp(-1, 1)
+                #     vae_loss = vae_loss + w / F.mse_loss(gap_pred_frames.float(), batch[0][:,i][:, :3].clamp(-1, 1).float(), reduction="mean")
+                
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(target_latents)
                 bsz = target_latents.shape[0]
@@ -310,10 +340,12 @@ def main(args):
                 else:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
+                loss = loss + vae_loss
+                
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
-                        itertools.chain(unet.parameters())
+                        itertools.chain(unet.parameters(), adapter.parameters(), vae_trainable_params)
                     )
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
@@ -321,7 +353,6 @@ def main(args):
                 optimizer.zero_grad()
 
             # write to tensorboard
-            progress_bar.set_description(f"[post]Steps {global_step}")
             # if global_step % 10 == 0:
             #     weights = adapter.linear1.weight.cpu().detach().numpy()
             #     weights = np.sum(weights, axis=0)
@@ -332,22 +363,25 @@ def main(args):
             #     #plt.hist(weights)
             #     writer.add_figure('embedding_weights', plt.gcf(), global_step=global_step)
 
-            writer.add_scalar("loss/train", loss.detach().item(), global_step)
+            # writer.add_scalar("loss/train", loss.detach().item(), global_step)
             if global_step % 50 == 0:
                 with torch.no_grad():
                     pred_latents = noisy_latents[:,:4,:,:] - model_pred
                     pred_images = latents2img(pred_latents)
                     
                     noise_viz = latents2img(noisy_latents[:,:4,:,:])
+                    decode_vis = inputs2img(pred_frames)
+                    
                     target = inputs2img(target_frames[:,:3])
                     input_img = inputs2img(batch[0][:,-2,:3])
                     
-                    writer.add_image(f'train/input_last', input_img[0], global_step=global_step)
-                    writer.add_image(f'train/noise_viz', noise_viz[0], global_step=global_step)
-                    writer.add_image(f'train/pred_img', pred_images[0], global_step=global_step)
-                    writer.add_image(f'train/target', target[0], global_step=global_step)
+                    writer.add_image(f'train/0input_last', input_img[0], global_step=global_step)
+                    writer.add_image(f'train/1noise_viz', noise_viz[0], global_step=global_step)
+                    writer.add_image(f'train/2pred_img', pred_images[0], global_step=global_step)
+                    writer.add_image(f'train/3target', target[0], global_step=global_step)
+                    writer.add_image(f'train/4decode_vis', decode_vis[0], global_step=global_step)
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": loss.detach().item(),"vae_loss":vae_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             
@@ -360,21 +394,31 @@ def main(args):
                 break
 
             # save model
-            if accelerator.is_main_process and global_step % 500 == 0:
-                pipeline = StableDiffusionCT2CTPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=accelerator.unwrap_model(tokenizer),
-                    unet=accelerator.unwrap_model(unet),
-                    # adapter=accelerator.unwrap_model(adapter),
-                )
-                pipeline.save_pretrained(os.path.join(args.output_dir, f'checkpoint-{epoch}'))
-                model_path = os.path.join(args.output_dir, f'unet_epoch_{epoch}.pth')
+            if accelerator.is_main_process and global_step % 100 == 0 and not first_batch:
+                progress_bar.set_description(f"saveing models: ")
+                # pipeline = StableDiffusionCT2CTPipeline.from_pretrained(
+                #     args.pretrained_model_name_or_path,
+                #     vae=accelerator.unwrap_model(vae),
+                #     text_encoder=accelerator.unwrap_model(text_encoder),
+                #     tokenizer=accelerator.unwrap_model(tokenizer),
+                #     unet=accelerator.unwrap_model(unet),
+                #     # adapter=accelerator.unwrap_model(adapter),
+                # )
+                checkpoint_path = os.path.join(args.output_dir, f'checkpoint-{epoch}')
+                # pipeline.save_pretrained(checkpoint_path)
+                if not os.path.exists(checkpoint_path):
+                    os.makedirs(checkpoint_path)
+                progress_bar.set_description(f"saveing models: unet.pth")
+                model_path = os.path.join(checkpoint_path, 'unet.pth')
                 torch.save(unet.state_dict(), model_path)
-                adapter_path = os.path.join(args.output_dir, f'adapter_{epoch}.pth')
+                progress_bar.set_description("saveing models: adapter.pth")
+                adapter_path = os.path.join(checkpoint_path, 'adapter.pth')
                 torch.save(adapter.state_dict(), adapter_path)
-            progress_bar.set_description(f"[end_loop]Steps {global_step}")
+                progress_bar.set_description("saveing models: vae.pth")
+                vae_path = os.path.join(checkpoint_path,'vae.pth')
+                torch.save(vae.state_dict(), vae_path)
+                progress_bar.set_description("")
+            first_batch = False
         accelerator.wait_for_everyone()
 
     accelerator.end_training()
