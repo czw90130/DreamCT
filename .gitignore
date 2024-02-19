@@ -1,3 +1,6 @@
 ct-pred-model/
 __pycache__/
 model_stabilityai-stable-diffusion-2-inpainting/
+*.pth
+*.safetensors
+*.npz

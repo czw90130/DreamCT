@@ -90,7 +90,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        # adapter: Embedding_Adapter,
+        adapter: Embedding_Adapter,
         scheduler: Union[
             DDIMScheduler,
             PNDMScheduler,
@@ -139,12 +139,13 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            # adapter=adapter
+            adapter=adapter
         )
 
         self.vae = self.vae.cuda()
         self.unet = self.unet.cuda()
         self.text_encoder = self.text_encoder.cuda()
+        self.adapter = self.adapter.cuda()
         
         
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)

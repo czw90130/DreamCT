@@ -20,6 +20,7 @@ from diffusers.models import UNet2DConditionModel
 from transformers import CLIPTokenizer, CLIPTextModel
 
 def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
+    print("Loading UNet")
     # 判断是否是自建模型
     load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet", "unet.pth"))
     if load_pth:
@@ -27,7 +28,7 @@ def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
         with open(os.path.join(pretrained_model_name_or_path, "unet", "config.json"), "r") as f:
             config = json.load(f)
         # 初始化模型结构
-        unet = UNet2DConditionModel(**config)
+        unet = UNet2DConditionModel.from_config(config)
     else:
         # Load pretrained UNet layers
         unet = UNet2DConditionModel.from_pretrained(
@@ -57,7 +58,7 @@ def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
         unet_state_dict = torch.load(unet_chkpt, map_location="cpu")
         new_state_dict = OrderedDict()
         for k, v in unet_state_dict.items():
-            name = k if k in unet.state_dict() else k[7:] if k[:7] == 'module.' else 
+            name = k if k in unet.state_dict() else k[7:]
             new_state_dict[name] = v
         unet.load_state_dict(new_state_dict)
 
@@ -89,12 +90,12 @@ def getLatent_model(pretrained_model_name_or_path, revision=None):
         with open(os.path.join(pretrained_model_name_or_path, "vae", "config.json"), "r") as f:
             config = json.load(f)
         # 初始化模型结构
-        vae = AutoencoderKL(**config)
+        vae = AutoencoderKL.from_config(config)
         vae_chkpt = os.path.join(pretrained_model_name_or_path, "vae", "vae.pth")
         vae_state_dict = torch.load(vae_chkpt, map_location="cpu")
         new_state_dict = OrderedDict()
         for k, v in vae_state_dict.items():
-            name = k if k in vae.state_dict() else k[7:] if k[:7] == 'module.' else k
+            name = k if k in vae.state_dict() else k[7:]
             new_state_dict[name] = v
         vae.load_state_dict(new_state_dict)
 
@@ -135,7 +136,7 @@ class Embedding_Adapter(nn.Module):
             adapter_state_dict = torch.load(chkpt)
             new_state_dict = OrderedDict()
             for k, v in adapter_state_dict.items():
-                name = k if k in self.state_dict() else k[7:] if k[:7] == 'module.' else k
+                name = k if k in self.state_dict() else k[7:]
                 new_state_dict[name] = v
             self.load_state_dict(new_state_dict)
             print("Adapter loaded.")

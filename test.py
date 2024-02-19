@@ -13,14 +13,14 @@ from collections import OrderedDict
 from torch import nn
 import torch, cv2
 import torch.nn.functional as F
-from models.unet_dual_encoder import get_unet, Embedding_Adapter
+from models.unet_dual_encoder import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--folder", default='dreampose-1', help="Path to custom pretrained checkpoints folder.",)
 parser.add_argument("--pose_folder", default='../UBC_Fashion_Dataset/valid/91iZ9x8NI0S.mp4', help="Path to test frames, poses, and joints.",)
 parser.add_argument("--test_poses", default=None, help="Path to test frames, poses, and joints.",)
 parser.add_argument("--epoch", type=int, default=44, required=True, help="Pretrained custom model checkpoint epoch number.",)
-parser.add_argument("--key_frame_path", default='../UBC_Fashion_Dataset/dreampose/91iZ9x8NI0S.mp4/key_frame.png', help="Path to key frame.",)
+parser.add_argument("--ct_path", default='testdata/s0011.npz', help="Path to ct.",)
 parser.add_argument("--pose_path", default='../UBC_Fashion_Dataset/valid/A1F1j+kNaDS.mp4/85_to_95_to_116/skeleton_i.npy', help="Pretrained model checkpoint step number.",)
 parser.add_argument("--strength", type=float, default=1.0, required=False, help="How much noise to add to input image.",)
 parser.add_argument("--s1", type=float, default=0.5, required=False, help="Classifier free guidance of input image.",)
@@ -45,47 +45,26 @@ model_id = f"{args.folder}/checkpoint-{args.epoch}" #if args.step > 0 else "Comp
 device = "cuda"
 
 # Load UNet
-unet = get_unet('CompVis/stable-diffusion-v1-4', "ebb811dd71cdc38a204ecbdd6ac5d580f529fd8c", resolution=512)
-unet_path = f"{args.folder}/unet_epoch_{args.epoch}.pth"
-print("Loading ", unet_path)
-unet_state_dict = torch.load(unet_path)
-new_state_dict = OrderedDict()
-for k, v in unet_state_dict.items():
-    name = k.replace('module.', '') #k[7:] if k[:7] == 'module' else k 
-    new_state_dict[name] = v
-unet.load_state_dict(new_state_dict)
+unet = get_unet(args.folder, "unet")
 unet = unet.cuda()
 
-print("Loading custom model from: ", model_id)
-pipe = StableDiffusionCT2CTPipeline.from_pretrained(model_id, unet=unet, torch_dtype=torch.float16, revision="fp16")
-pipe.safety_checker = lambda images, clip_input: (images, False) # disable safety check
+# Load VAE
+vae = getLatent_model(args.folder, "vae")
+
+# Load text encoder and tokenizer
+text_encoder, tokenizer = load_text_encoder(args.folder)
+
+# Load adapter
+adapter = Embedding_Adapter(chkpt=os.path.join(args.folder, 'adapter.pth'))
+
+# Load scheduler
+scheduler = DDIMScheduler.from_pretrained(args.folder, subfolder="scheduler")
+
+# Load pipeline
+pipe = StableDiffusionCT2CTPipeline(vae, text_encoder, tokenizer, unet, adapter, scheduler)
 
 #pipe.unet.load_state_dict(torch.load(f'{save_folder}/unet_epoch_{args.epoch}.pth'))  #'results/epoch_1/unet.pth'))
 #pipe.unet = pipe.unet.cuda()
-
-adapter_chkpt = f'{args.folder}/adapter_{args.epoch}.pth'
-print("Loading ", adapter_chkpt)
-adapter_state_dict = torch.load(adapter_chkpt)
-new_state_dict = OrderedDict()
-for k, v in adapter_state_dict.items():
-    name = k.replace('module.', '')  #name = k[7:] if k[:7] == 'module' else k 
-    new_state_dict[name] = v
-print(pipe.adapter.linear1.weight)
-pipe.adapter = Embedding_Adapter()
-pipe.adapter.load_state_dict(new_state_dict)
-print(pipe.adapter.linear1.weight)
-pipe.adapter = pipe.adapter.cuda()
-
-if args.custom_vae is not None:
-    vae_chkpt = args.custom_vae
-    print("Loading custom vae checkpoint from ", vae_chkpt, '...')
-    vae_state_dict = torch.load(vae_chkpt)
-    new_state_dict = OrderedDict()
-    for k, v in vae_state_dict.items():
-        name = k.replace('module.', '')  #name = k[7:] if k[:7] == 'module' else k 
-        new_state_dict[name] = v
-    pipe.vae.load_state_dict(new_state_dict)
-    pipe.vae = pipe.vae.cuda()
 
 # Change scheduler
 if args.sampler == 'DDIM':
@@ -132,8 +111,9 @@ tensor_transforms = transforms.Compose(
     ]
 )
 
-# Load key frame
-input_image = PIL.Image.open(args.key_frame_path).resize(imSize)
+# Load ct data
+npz_data = np.load(args.ct_path, allow_pickle=True)
+
 
 if args.j >= 0:
     j = args.j
