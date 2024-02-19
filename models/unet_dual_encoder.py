@@ -1,7 +1,10 @@
 # Load pretrained 2D UNet and modify with temporal attention
+import os
+import json
 
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -17,12 +20,21 @@ from diffusers.models import UNet2DConditionModel
 from transformers import CLIPTokenizer, CLIPTextModel
 
 def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
-    # Load pretrained UNet layers
-    unet = UNet2DConditionModel.from_pretrained(
-        pretrained_model_name_or_path,
-        subfolder="unet",
-        revision=revision
-    )
+    # 判断是否是自建模型
+    load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet", "unet.pth"))
+    if load_pth:
+        # 加载json文件
+        with open(os.path.join(pretrained_model_name_or_path, "unet", "config.json"), "r") as f:
+            config = json.load(f)
+        # 初始化模型结构
+        unet = UNet2DConditionModel(**config)
+    else:
+        # Load pretrained UNet layers
+        unet = UNet2DConditionModel.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="unet",
+            revision=revision
+        )
 
     # Modify input layer to have 1 additional input channels (spine)
     weights = unet.conv_in.weight.clone()
@@ -38,6 +50,16 @@ def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
     with torch.no_grad():
         unet.conv_in.weight[:, :ori_channels] = weights # original weights
         unet.conv_in.weight[:, ori_channels:] = torch.zeros_like(unet.conv_in.weight[:, ori_channels:]) # new weights initialized to zero
+
+    if load_pth:
+        # 加载预训练模型
+        unet_chkpt = os.path.join(pretrained_model_name_or_path, "unet", "unet.pth")
+        unet_state_dict = torch.load(unet_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in unet_state_dict.items():
+            name = k if k in unet.state_dict() else k[7:] if k[:7] == 'module.' else 
+            new_state_dict[name] = v
+        unet.load_state_dict(new_state_dict)
 
     return unet
 
@@ -60,11 +82,27 @@ def load_text_encoder(pretrained_model_name_or_path, revision=None):
 def getLatent_model(pretrained_model_name_or_path, revision=None):
     # 加载VAE模型
     # 加载VAE模型用于编码和解码图像到隐空间
-    print(f"Loading VAE model")
-    vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, 
-                                        # torch_dtype=torch.float16,
-                                        subfolder = "vae",
-                                        revision=revision).cuda()
+    print("Loading VAE model")
+    load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "vae", "vae.pth"))
+    if load_pth:
+        # 加载json文件
+        with open(os.path.join(pretrained_model_name_or_path, "vae", "config.json"), "r") as f:
+            config = json.load(f)
+        # 初始化模型结构
+        vae = AutoencoderKL(**config)
+        vae_chkpt = os.path.join(pretrained_model_name_or_path, "vae", "vae.pth")
+        vae_state_dict = torch.load(vae_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in vae_state_dict.items():
+            name = k if k in vae.state_dict() else k[7:] if k[:7] == 'module.' else k
+            new_state_dict[name] = v
+        vae.load_state_dict(new_state_dict)
+
+    else:
+        vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, 
+                                            # torch_dtype=torch.float16,
+                                            subfolder = "vae",
+                                            revision=revision).cuda()
     print("VAE model loaded.")
     
     return vae
@@ -94,7 +132,13 @@ class Embedding_Adapter(nn.Module):
         self.linear1.apply(self._init_weights)
 
         if chkpt is not None:
-            self.load_state_dict(torch.load(chkpt))
+            adapter_state_dict = torch.load(chkpt)
+            new_state_dict = OrderedDict()
+            for k, v in adapter_state_dict.items():
+                name = k if k in self.state_dict() else k[7:] if k[:7] == 'module.' else k
+                new_state_dict[name] = v
+            self.load_state_dict(new_state_dict)
+            print("Adapter loaded.")
     
     def forward(self, clip, vaes):
         assert isinstance(vaes, list) and len(vaes) == self.num_vaes, f"Expected a list of {self.num_vaes} VAE embeddings, but got {len(vaes)}"
