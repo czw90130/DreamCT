@@ -368,6 +368,8 @@ def main(args):
                 with torch.no_grad():
                     pred_latents = noisy_latents[:,:4,:,:] - model_pred
                     pred_images = latents2img(pred_latents)
+                    tgt_latents = noisy_latents[:,:4,:,:] - target
+                    tgt_images = latents2img(tgt_latents)
                     
                     noise_viz = latents2img(noisy_latents[:,:4,:,:])
                     decode_vis = inputs2img(pred_frames)
@@ -378,8 +380,9 @@ def main(args):
                     writer.add_image(f'train/0input_last', input_img[0], global_step=global_step)
                     writer.add_image(f'train/1noise_viz', noise_viz[0], global_step=global_step)
                     writer.add_image(f'train/2pred_img', pred_images[0], global_step=global_step)
-                    writer.add_image(f'train/3target', target[0], global_step=global_step)
-                    writer.add_image(f'train/4decode_vis', decode_vis[0], global_step=global_step)
+                    writer.add_image(f'train/3tgt_img', tgt_images[0], global_step=global_step)
+                    writer.add_image(f'train/4target', target[0], global_step=global_step)
+                    writer.add_image(f'train/5decode_vis', decode_vis[0], global_step=global_step)
 
             logs = {"loss": loss.detach().item(),"vae_loss":vae_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -394,7 +397,7 @@ def main(args):
                 break
 
             # save model
-            if accelerator.is_main_process and global_step % 100 == 0 and not first_batch:
+            if accelerator.is_main_process and global_step % 500 == 0 and not first_batch:
                 progress_bar.set_description(f"saveing models: ")
                 # pipeline = StableDiffusionCT2CTPipeline.from_pretrained(
                 #     args.pretrained_model_name_or_path,

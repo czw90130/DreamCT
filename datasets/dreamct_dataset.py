@@ -153,7 +153,26 @@ class CTdataProcessor:
         # 随机选择一个模板并返回
         return random.choice(templates).replace("  ", " ").replace(",,", ",").strip()
     
-    def to_frame(self, ct, plane, start_idx, sample_num=3, positive_order=True):
+    def load_npz(self, ct_npz_path, meta_only=False):
+        # 加载数据并添加到缓存
+        npz_data = np.load(ct_npz_path, allow_pickle=True)
+        data = {
+            'meta': npz_data['meta'].item(),
+        }
+        if meta_only:
+            return data
+        data['hor_slices'] = npz_data['hor_slices'][:]
+        data['sag_slices'] = npz_data['sag_slices'][:]
+        data['cor_slices'] = npz_data['cor_slices'][:]
+
+        return data
+
+    def __call__(self, ct_npz_path, plane, start_idx, slice_size=None, sample_num=3, positive_order=True):
+        return self.to_frame(ct_npz_path, plane, start_idx, slice_size, sample_num, positive_order)
+    
+    def to_frame(self, ct, plane, start_idx, slice_size=None, sample_num=3, positive_order=True):
+        if isinstance(ct, str):
+            ct = self.load_npz(ct)
         slices = ct[plane]
         sm_ch = ct['meta']['spine_marker_channel']
         
@@ -170,8 +189,13 @@ class CTdataProcessor:
         all_slices = torch.from_numpy(slices[start_idx:start_idx+sample_num]).to(torch.float32)  # 转换为torch张量
         all_slices = all_slices.permute(0, 3, 1, 2)  # 重排维度为[B, C, H, W]
         
-        # 使用interpolate进行一次性插值，假设self.slice_size是目标大小
-        frames = F.interpolate(all_slices, size=(self.slice_size, self.slice_size), mode='bilinear', align_corners=False)
+        if isinstance(slice_size, int):
+            # 使用interpolate进行一次性插值，假设self.slice_size是目标大小
+            frames = F.interpolate(all_slices, size=(slice_size, slice_size), mode='bilinear', align_corners=False)
+        elif isinstance(slice_size, (tuple, list)) and len(slice_size) == 2:
+            frames = F.interpolate(all_slices, size=slice_size, mode='bilinear', align_corners=False)
+        else:
+            frames = all_slices
         
         if not properties['positive_order']:
             frames = frames.flip(0)  # 翻转顺序
@@ -179,9 +203,11 @@ class CTdataProcessor:
         # 获取存在的脊柱tag
         obj_tags = []
         for obj_tag, index_value in ct['meta']['spine_marker'].items():
-            if index_value in frames[-1,:,:,sm_ch]:
+            if index_value in frames[-1,sm_ch]:
                 obj_tags.append(obj_tag)
                 properties['spines'] = '|'.join(obj_tags)
+        # sm_ch 归一化
+        frames[:,sm_ch] = frames[:,sm_ch] / 12.5 - 1
         properties['sentence'] = self.dict_to_sentence(properties)
         
         return frames, properties
@@ -236,15 +262,9 @@ class CTFramesDataset(Dataset, CTdataProcessor):
             return self.cache[ct_npz_path]
         else:
             # 加载数据并添加到缓存
-            npz_data = np.load(ct_npz_path, allow_pickle=True)
-            data = {
-                'meta': npz_data['meta'].item(),
-            }
+            data = self.load_npz(ct_npz_path, meta_only)
             if meta_only:
                 return data
-            data['hor_slices'] = npz_data['hor_slices'][:]
-            data['sag_slices'] = npz_data['sag_slices'][:]
-            data['cor_slices'] = npz_data['cor_slices'][:]
             self.cache[ct_npz_path] = data
             # 如果缓存超过了指定大小，移除最旧的条目
             if len(self.cache) > self.cache_size:
@@ -259,7 +279,7 @@ class CTFramesDataset(Dataset, CTdataProcessor):
         ct_npz, plane, start_idx = self.data_idx_buffer[idx]
         ct = self.load_data(ct_npz)
         
-        return self.to_frame(ct, plane, start_idx, self.frame_num, random.choice([True, False]))
+        return self.to_frame(ct, plane, start_idx, slice_size=self.slice_size, sample_num=self.frame_num, positive_order=random.choice([True, False]))
     
 if __name__ == "__main__":
     from torch.utils.data import DataLoader

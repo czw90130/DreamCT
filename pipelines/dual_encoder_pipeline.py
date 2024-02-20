@@ -226,11 +226,26 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             input_ids = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).input_ids
             input_ids = input_ids.cuda()
             clip_hidden_states = self.text_encoder(input_ids).last_hidden_state
-            #print("clip states shape = ", clip_hidden_states.shape)
+            print("clip states shape = ", clip_hidden_states.shape)
             
             uncond_input_ids = self.tokenizer(negative_prompt, return_tensors="pt", padding=True, truncation=True).input_ids
-            uncond_input_ids = uncond_input_ids.cuda()
-            clip_uncond_hidden_states = self.text_encoder(uncond_input_ids).last_hidden_state
+
+            # 计算长度差异
+            length_difference = input_ids.size(1) - uncond_input_ids.size(1)
+
+            if length_difference > 0:
+                # 如果 uncond_input_ids 比 input_ids 短，对 uncond_input_ids 进行补零
+                uncond_input_ids_padded = F.pad(uncond_input_ids, (0, length_difference), "constant", 0)
+            elif length_difference < 0:
+                # 如果 uncond_input_ids 比 input_ids 长，对 uncond_input_ids 进行截断
+                uncond_input_ids_padded = uncond_input_ids[:, :input_ids.size(1)]
+            else:
+                # 如果长度相等，则不需要修改
+                uncond_input_ids_padded = uncond_input_ids
+
+            uncond_input_ids_padded = uncond_input_ids_padded.cuda()
+            clip_uncond_hidden_states = self.text_encoder(uncond_input_ids_padded).last_hidden_state
+            print("uncond clip states shape = ", clip_uncond_hidden_states.shape)
             
     
             uncond_frames = torch.zeros_like(frames)
@@ -242,22 +257,27 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
                 # if i==0:
                 #     print("vae states shape = ", vae_hs.shape)
                 vae_hidden_states.append(vae_hs)
+
                 vae_uncond_hs = self.vae.encode(uncond_frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
                 vae_uncond_hidden_states.append(vae_uncond_hs)
 
             # adapt embeddings
             ct_embeddings = self.adapter(clip_hidden_states, vae_hidden_states)
             uncond_ct_embeddings = self.adapter(clip_uncond_hidden_states, vae_uncond_hidden_states)
+            print("ct embeddings shape = ", ct_embeddings.shape)
+            print("uncond ct embeddings shape = ", uncond_ct_embeddings.shape)
 
         #print(ct_embeddings.shape)
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         bs_embed, seq_len, _ = ct_embeddings.shape
         ct_embeddings  = ct_embeddings.repeat(1, num_images_per_prompt, 1)
         ct_embeddings = ct_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        print("maped ct embeddings shape = ", ct_embeddings.shape)
 
         bs_embed, seq_len, _ = uncond_ct_embeddings .shape
         uncond_ct_embeddings  = uncond_ct_embeddings.repeat(1, num_images_per_prompt, 1)
         uncond_ct_embeddings = uncond_ct_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        print("maped uncond ct embeddings shape = ", uncond_ct_embeddings.shape)
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
@@ -357,6 +377,25 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         latents = init_latents
 
         return latents
+    
+    @property
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._execution_device
+    def _execution_device(self):
+        r"""
+        Returns the device on which the pipeline's models will be executed. After calling
+        `pipeline.enable_sequential_cpu_offload()` the execution device can only be inferred from Accelerate's module
+        hooks.
+        """
+        if self.device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
+            return self.device
+        for module in self.unet.modules():
+            if (
+                hasattr(module, "_hf_hook")
+                and hasattr(module._hf_hook, "execution_device")
+                and module._hf_hook.execution_device is not None
+            ):
+                return torch.device(module._hf_hook.execution_device)
+        return self.device
 
     @torch.no_grad()
     def __call__(
@@ -369,7 +408,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         guidance_scale: Optional[float] = 7.5,
         s1: float = 1.0, # strength of input spine_marker
         s2: float = 1.0, # strength of input prev_frames
-        negative_prompt: Optional[Union[str, List[str]]] = None,
+        negative_prompt: Optional[Union[str, List[str]]] = "",
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = 0.0,
         generator: Optional[torch.Generator] = None,
@@ -455,28 +494,29 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         # 1. Check inputs
         self.check_inputs(prompt, strength, callback_steps)
 
-        # 2. Set adapter
-        if adapter is not None:
-            print("Setting adapter")
-            self.adapter = adapter
-
-        # 3. Define call parameters
-        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        # 2. Define call parameters
+        if isinstance(prompt, str):
+            batch_size = 1
+            prev_frames = prev_frames.unsqueeze(0)
+            spine_marker = spine_marker.unsqueeze(0)
+        else:
+            batch_size = len(prompt)
+        if len(spine_marker.shape) == 3:
+            # add channel dimension
+            spine_marker = spine_marker.unsqueeze(1)
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0 or s1 > 0.0 or s2 > 0.0
 
-        # 4. Encode input image: [unconditional, condional, conditional]
-        
+        # 3. Encode input image: [unconditional, condional, conditional]
         embeddings = self._encode_frames(
             prompt, prev_frames, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
         )
 
-        # 5. Preprocess image
-        last_frame = prev_frames[:,-1]
-
+        # 4. Preprocess frames
+        last_frame = prev_frames[:,-1,:3]
 
         # 6. Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -520,6 +560,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
                             spine_marker_input = torch.cat([torch.zeros(spine_marker.shape), spine_marker, torch.zeros(spine_marker.shape)]) 
                         else:
                             spine_marker_input = torch.cat([spine_marker, spine_marker, spine_marker]) 
+
                         latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(spine_marker_input, (h,w)).cuda()), 1)
 
                         # predict the noise residual
