@@ -49,19 +49,7 @@ def main(args):
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
+        if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
     
     # Load text encoder
@@ -75,9 +63,8 @@ def main(args):
     # Load pretrained UNet layers
     unet = get_unet(args.pretrained_model_name_or_path)
 
-    # Embedding adapter
-    adapter = Embedding_Adapter(num_vaes=args.preframe_num)
-    #adapter.requires_grad_(True)
+    # # Embedding adapter
+    # adapter = Embedding_Adapter(num_vaes=args.preframe_num)
 
     vae.requires_grad_(False)
     vae_trainable_params = []
@@ -90,7 +77,7 @@ def main(args):
     
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
-        adapter.enable_gradient_checkpointing()
+        # adapter.enable_gradient_checkpointing()
         vae.gradient_checkpointing_enable()
 
     if args.scale_lr:
@@ -112,7 +99,8 @@ def main(args):
     optimizer_class = torch.optim.AdamW
 
     params_to_optimize = (
-        itertools.chain(unet.parameters(), adapter.parameters(), vae_trainable_params)
+        # itertools.chain(unet.parameters(), adapter.parameters(), vae_trainable_params)
+        itertools.chain(unet.parameters(), vae_trainable_params)
     )
 
     optimizer = optimizer_class(
@@ -148,37 +136,12 @@ def main(args):
     )
 
 
-    unet, adapter, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, adapter, optimizer, train_dataloader, lr_scheduler
+    # unet, adapter, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+    #     unet, adapter, optimizer, train_dataloader, lr_scheduler
+    # )
+    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler
     )
-
-    adapter_chkpt = os.path.join(args.pretrained_model_name_or_path, 'adapter.pth')
-    if os.path.exists(adapter_chkpt):
-        print("Loading ", adapter_chkpt)
-        adapter_state_dict = torch.load(adapter_chkpt, map_location="cpu")
-        new_state_dict = OrderedDict()
-        for k, v in adapter_state_dict.items():
-            # name = k[7:] if k[:7] == 'module.' else k
-            new_state_dict[k] = v
-        adapter.load_state_dict(new_state_dict)
-    unet_chkpt = os.path.join(args.pretrained_model_name_or_path, 'unet.pth')
-    if os.path.exists(unet_chkpt):
-        print("Loading ", unet_chkpt)
-        unet_state_dict = torch.load(unet_chkpt, map_location="cpu")
-        new_state_dict = OrderedDict()
-        for k, v in unet_state_dict.items():
-            # name = k[7:] if k[:7] == 'module.' else k 
-            new_state_dict[k] = v
-        unet.load_state_dict(new_state_dict)
-    vae_chkpt = os.path.join(args.pretrained_model_name_or_path, 'vae.pth')
-    if os.path.exists(vae_chkpt):
-        print("Loading ", vae_chkpt)
-        vae_state_dict = torch.load(vae_chkpt, map_location="cpu")
-        new_state_dict = OrderedDict()
-        for k, v in vae_state_dict.items():
-            # name = k[7:] if k[:7] == 'module.' else k 
-            new_state_dict[k] = v
-        vae.load_state_dict(new_state_dict)
         
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -246,7 +209,7 @@ def main(args):
     # latest_chkpt_step = 0
     for epoch in range(args.epoch, args.num_train_epochs):
         unet.train()
-        adapter.train()
+        # adapter.train()
         vae.train()
         first_batch = True
         for batch in train_dataloader:
@@ -291,11 +254,21 @@ def main(args):
                 # print("target_latents shape = ", target_latents.shape)
                 noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
                 # print("noisy_latents shape = ", noisy_latents.shape)
-
-                # Concatenate spine markers with noise
-                _, _, h, w = noisy_latents.shape
-                noisy_latents = torch.cat((noisy_latents, F.interpolate(target_frames[:,3].unsqueeze(1), (h,w))), 1)
-                # print("new noisy_latents shape = ", noisy_latents.shape)
+                
+                # 编码控制项
+                # Get VAE embeddings
+                vae_hidden_states = []
+                for i in range(args.preframe_num):
+                    vae_hs = vae.encode(batch[0][:,i,:3].to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
+                    vae_hidden_states.append(vae_hs)
+                spine_marker = target_frames[:,3].unsqueeze(1)
+                spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
+                vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
+                vae_hidden_states.append(vae_sp)
+                vae_hidden_states = torch.cat(vae_hidden_states, 1)
+                # Concatenate vae hidden states with noise
+  
+                noisy_latents = torch.cat((noisy_latents, vae_hidden_states), 1)
                 
                 # 编码文字
                 input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
@@ -303,18 +276,10 @@ def main(args):
                 clip_hidden_states = text_encoder(input_ids).last_hidden_state
                 #print("clip states shape = ", clip_hidden_states.shape)
                 
-                # Get VAE embeddings
-                vae_hidden_states = []
-                for i in range(args.preframe_num):
-                    vae_hs = vae.encode(batch[0][:,i,:3].to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
-                    # if i==0:
-                    #     print("vae states shape = ", vae_hs.shape)
-                    vae_hidden_states.append(vae_hs)
-                
-                encoder_hidden_states = adapter(clip_hidden_states, vae_hidden_states)
+                # encoder_hidden_states = adapter(clip_hidden_states, vae_hidden_states)
 
                 # Predict the noise residual
-                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                model_pred = unet(noisy_latents, timesteps, clip_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -345,7 +310,8 @@ def main(args):
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
-                        itertools.chain(unet.parameters(), adapter.parameters(), vae_trainable_params)
+                        # itertools.chain(unet.parameters(), adapter.parameters(), vae_trainable_params)
+                        itertools.chain(unet.parameters(), vae_trainable_params)
                     )
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
@@ -389,7 +355,7 @@ def main(args):
             accelerator.log(logs, step=global_step)
             
             # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
+            if accelerator.sync_gradients: 
                 progress_bar.update(1)
                 global_step += 1
 
@@ -415,8 +381,8 @@ def main(args):
                 model_path = os.path.join(checkpoint_path, 'unet.pth')
                 torch.save(unet.state_dict(), model_path)
                 progress_bar.set_description("saveing models: adapter.pth")
-                adapter_path = os.path.join(checkpoint_path, 'adapter.pth')
-                torch.save(adapter.state_dict(), adapter_path)
+                # adapter_path = os.path.join(checkpoint_path, 'adapter.pth')
+                # torch.save(adapter.state_dict(), adapter_path)
                 progress_bar.set_description("saveing models: vae.pth")
                 vae_path = os.path.join(checkpoint_path,'vae.pth')
                 torch.save(vae.state_dict(), vae_path)

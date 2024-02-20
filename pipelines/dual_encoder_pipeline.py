@@ -340,9 +340,11 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         """
         with autocast():
             image = image.to(device=device, dtype=dtype).cuda()
+            print("Image Shape = ", image.shape)
             init_latent_dist = self.vae.encode(image).latent_dist
             init_latents = init_latent_dist.sample(generator=generator)
             init_latents = 0.18215 * init_latents
+            print("Init Latents Shape = ", init_latents.shape)
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size

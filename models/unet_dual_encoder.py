@@ -19,7 +19,8 @@ from diffusers import AutoencoderKL
 from diffusers.models import UNet2DConditionModel
 from transformers import CLIPTokenizer, CLIPTextModel
 
-def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
+# 增加的通道为t-2,t-1,t 和 spine
+def get_unet(pretrained_model_name_or_path, revision=None, add_channels=4*(3+1)):
     print("Loading UNet")
     # 判断是否是自建模型
     load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet", "unet.pth"))
