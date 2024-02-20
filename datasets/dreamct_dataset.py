@@ -7,9 +7,7 @@ import numpy as np
 from tqdm import tqdm
 from collections import OrderedDict
 import random
-from concurrent.futures import ThreadPoolExecutor
 import time
-from einops import rearrange
 import gc
 
 '''
@@ -156,7 +154,8 @@ class CTdataProcessor:
             f"{parts['gender']} patient, {parts['spine_list']} {parts['order']}.",
             f"{parts['plane']} plane: {parts['spine_list']}.",
             f"{parts['age']} {parts['gender']}: {parts['spine_list']} {parts['order']}.",
-            f"{parts['spine_list']}, {parts['plane']} plane {parts['order']}."
+            f"{parts['spine_list']}, {parts['plane']} plane {parts['order']}.",
+            ""
         ]
         
         # 确保至少有一个部分填充
@@ -184,7 +183,62 @@ class CTdataProcessor:
     def __call__(self, ct_npz_path, plane, start_idx, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True):
         return self.to_frame(ct_npz_path, plane, start_idx, slice_size, sample_num, positive_order, randomize_sentence)
     
-    def to_frame(self, ct, plane, start_idx, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True):
+    def interpolate_frames(self, all_slices, slice_size, cat_prev_frame):
+        # 确保 slice_size 是整数
+        assert isinstance(slice_size, int), "slice_size must be an integer"
+        # 获取输入的形状
+        _, _, h, w = all_slices.shape
+        # 计算缩放因子，以最长边为准
+        scale_factor = slice_size / max(h, w)
+        # 如果 cat_prev_frame 为 True，有 50% 的概率在 scale_factor 基础上乘以一个 [0.5~1] 的随机缩小因子
+        if cat_prev_frame and random.random() < 0.5:
+            scale_factor *= random.uniform(0.5, 1)
+        # 计算新的高度和宽度
+        new_h, new_w = int(h * scale_factor), int(w * scale_factor)
+        # 使用双线性插值进行缩放
+        frames = F.interpolate(all_slices, size=(new_h, new_w), mode='bilinear', align_corners=False)
+        # 如果短边小于 slice_size，将图像放在新的 slice_size * slice_size 的张量中间
+        if new_h < slice_size or new_w < slice_size:
+            # 创建新的张量
+            new_frames = torch.ones((all_slices.shape[0], all_slices.shape[1], slice_size, slice_size), device=all_slices.device) * -1
+            # 计算开始的索引
+            start_h = (slice_size - new_h) // 2
+            start_w = (slice_size - new_w) // 2
+            # 将缩放后的图像放在新的张量中间
+            new_frames[:, :, start_h:start_h+new_h, start_w:start_w+new_w] = frames
+            # 更新 frames
+            frames = new_frames
+        # 如果 cat_prev_frame 为 True，随机在 frames[:-1] 中裁剪一些方块并设置为 0
+        # 如果 cat_prev_frame 为 True，随机在 frames[:-1] 中裁剪一些方块并设置为 0
+        if cat_prev_frame:
+            # 计算裁剪的方块数量
+            num_blocks = random.randint(0, 5)
+            for _ in range(num_blocks):
+                # 随机选择一个方块
+                block_h = random.randint(0, slice_size // 2)
+                block_w = random.randint(0, slice_size // 2)
+                # 设置这个方块为 0
+                if random.random() < 0.5:
+                    # 随机选择一个起点
+                    end_h = random.randint(block_h, slice_size // 2)
+                    end_w = random.randint(block_w, slice_size // 2)
+                    frames[:-1, :3, block_h:end_h, block_w:end_w] = -1
+                else:
+                # 随机选择一个边缘并裁剪一定的宽度
+                    edge = random.choice(['top', 'bottom', 'left', 'right'])
+                    if edge == 'top':
+                        frames[:-1, :3, :block_h, :] = -1
+                    elif edge == 'bottom':
+                        frames[:-1, :3, -block_h:, :] = -1
+                    elif edge == 'left':
+                        frames[:-1, :3, :, :block_w] = -1
+                    elif edge == 'right':
+                        frames[:-1, :3, :, -block_w:] = -1
+
+        return frames
+        
+    
+    def to_frame(self, ct, plane, start_idx, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True, cat_prev_frame=True):
         if isinstance(ct, str):
             ct = self.load_npz(ct)
         slices = ct[plane]
@@ -203,17 +257,8 @@ class CTdataProcessor:
         all_slices = torch.from_numpy(slices[start_idx:start_idx+sample_num]).to(torch.float32)  # 转换为torch张量
         all_slices = all_slices.permute(0, 3, 1, 2)  # 重排维度为[B, C, H, W]
         
-        if isinstance(slice_size, int):
-            # 使用interpolate进行一次性插值，假设self.slice_size是目标大小
-            frames = F.interpolate(all_slices, size=(slice_size, slice_size), mode='bilinear', align_corners=False)
-        elif isinstance(slice_size, (tuple, list)) and len(slice_size) == 2:
-            frames = F.interpolate(all_slices, size=slice_size, mode='bilinear', align_corners=False)
-        else:
-            frames = all_slices
+        frames = self.interpolate_frames(all_slices, slice_size, cat_prev_frame)
         
-        if not properties['positive_order']:
-            frames = frames.flip(0)  # 翻转顺序
-            
         # 获取存在的脊柱tag
         obj_tags = []
         for obj_tag, index_value in ct['meta']['spine_marker'].items():

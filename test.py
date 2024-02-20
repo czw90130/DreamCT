@@ -15,6 +15,7 @@ import torch, cv2
 import torch.nn.functional as F
 from models.unet_dual_encoder import *
 from datasets.dreamct_dataset import CTdataProcessor
+import numpy as np
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--folder", required=True, help="Path to custom pretrained checkpoints folder.",)
@@ -47,17 +48,11 @@ vae = getLatent_model(args.folder, "vae")
 # Load text encoder and tokenizer
 text_encoder, tokenizer = load_text_encoder(args.folder)
 
-# Load adapter
-adapter = Embedding_Adapter(chkpt=os.path.join(args.folder, 'adapter.pth'))
-
 # Load scheduler
 scheduler = DDIMScheduler.from_pretrained(args.folder, subfolder="scheduler")
 
 # Load pipeline
-pipe = StableDiffusionCT2CTPipeline(vae, text_encoder, tokenizer, unet, adapter, scheduler)
-
-#pipe.unet.load_state_dict(torch.load(f'{save_folder}/unet_epoch_{args.epoch}.pth'))  #'results/epoch_1/unet.pth'))
-#pipe.unet = pipe.unet.cuda()
+pipe = StableDiffusionCT2CTPipeline(vae, text_encoder, tokenizer, unet, scheduler)
 
 # Change scheduler
 if args.sampler == 'DDIM':
@@ -77,7 +72,7 @@ def visualize_im(image):
 
 # Load ct data
 ct_data_processor = CTdataProcessor()
-frames, properties = ct_data_processor(args.ct_path, 'sag_slices', 4, slice_size=512, sample_num=4, randomize_sentence=False)
+frames, properties = ct_data_processor(args.ct_path, 'hor_slices', 4, slice_size=512, sample_num=4, randomize_sentence=False)
 
 # Iterate samples
 print(frames.shape)
@@ -100,10 +95,13 @@ with autocast():
     # Save pose and image
     pred_image = visualize_im(image)
     tgt_image = visualize_im(target_frame[:3])
-    spine_image = visualize_im(spine_marker.unsqueeze(0))
-    cv2.imwrite(os.path.join(save_folder, 'pred.png'), cv2.cvtColor(pred_image, cv2.COLOR_BGR2RGB))
-    cv2.imwrite(os.path.join(save_folder, 'tgt.png'), cv2.cvtColor(tgt_image, cv2.COLOR_BGR2RGB))
-    cv2.imwrite(os.path.join(save_folder, 'spine.png'), cv2.cvtColor(spine_image, cv2.COLOR_BGR2RGB))
+    spine_image = visualize_im(spine_marker.unsqueeze(0).repeat(3, 1, 1))
+
+    # Concatenate the images horizontally
+    concatenated_image = np.concatenate((pred_image, tgt_image, spine_image), axis=1)
+
+    # Save the concatenated image
+    cv2.imwrite(os.path.join(save_folder, 'concatenated.png'), cv2.cvtColor(concatenated_image, cv2.COLOR_BGR2RGB))
 
 
     

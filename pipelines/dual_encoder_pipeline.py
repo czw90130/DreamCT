@@ -28,7 +28,7 @@ from diffusers import (
 
 from diffusers.utils import PIL_INTERPOLATION, deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
-from models.unet_dual_encoder import get_unet, Embedding_Adapter
+from models.unet_dual_encoder import get_unet
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -90,7 +90,6 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        adapter: Embedding_Adapter,
         scheduler: Union[
             DDIMScheduler,
             PNDMScheduler,
@@ -139,14 +138,11 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            adapter=adapter
         )
 
         self.vae = self.vae.cuda()
         self.unet = self.unet.cuda()
-        self.text_encoder = self.text_encoder.cuda()
-        self.adapter = self.adapter.cuda()
-        
+        self.text_encoder = self.text_encoder.cuda()  
         
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
 
@@ -154,9 +150,6 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         self.stochastic_sampling = stochastic_sampling
 
         print("Stochastic Sampling: ", self.stochastic_sampling)
-        
-    def init_adapter(self, adapter: Embedding_Adapter):
-        self.adapter = adapter.cuda()
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_sequential_cpu_offload
     def enable_sequential_cpu_offload(self, gpu_id=0):
@@ -172,7 +165,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
 
         device = torch.device(f"cuda:{gpu_id}")
 
-        for cpu_offloaded_model in [self.unet, self.image_encoder, self.clip_processor, self.vae, self.adapter]:
+        for cpu_offloaded_model in [self.unet, self.image_encoder, self.clip_processor, self.vae]:
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
@@ -227,63 +220,8 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             input_ids = input_ids.cuda()
             clip_hidden_states = self.text_encoder(input_ids).last_hidden_state
             print("clip states shape = ", clip_hidden_states.shape)
-            
-            uncond_input_ids = self.tokenizer(negative_prompt, return_tensors="pt", padding=True, truncation=True).input_ids
 
-            # 计算长度差异
-            length_difference = input_ids.size(1) - uncond_input_ids.size(1)
-
-            if length_difference > 0:
-                # 如果 uncond_input_ids 比 input_ids 短，对 uncond_input_ids 进行补零
-                uncond_input_ids_padded = F.pad(uncond_input_ids, (0, length_difference), "constant", 0)
-            elif length_difference < 0:
-                # 如果 uncond_input_ids 比 input_ids 长，对 uncond_input_ids 进行截断
-                uncond_input_ids_padded = uncond_input_ids[:, :input_ids.size(1)]
-            else:
-                # 如果长度相等，则不需要修改
-                uncond_input_ids_padded = uncond_input_ids
-
-            uncond_input_ids_padded = uncond_input_ids_padded.cuda()
-            clip_uncond_hidden_states = self.text_encoder(uncond_input_ids_padded).last_hidden_state
-            print("uncond clip states shape = ", clip_uncond_hidden_states.shape)
-            
-    
-            uncond_frames = torch.zeros_like(frames)
-            # Get VAE embeddings
-            vae_hidden_states = []
-            vae_uncond_hidden_states = []
-            for i in range(self.preframe_num):
-                vae_hs = self.vae.encode(frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
-                # if i==0:
-                #     print("vae states shape = ", vae_hs.shape)
-                vae_hidden_states.append(vae_hs)
-
-                vae_uncond_hs = self.vae.encode(uncond_frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
-                vae_uncond_hidden_states.append(vae_uncond_hs)
-
-            # adapt embeddings
-            ct_embeddings = self.adapter(clip_hidden_states, vae_hidden_states)
-            uncond_ct_embeddings = self.adapter(clip_uncond_hidden_states, vae_uncond_hidden_states)
-            print("ct embeddings shape = ", ct_embeddings.shape)
-            print("uncond ct embeddings shape = ", uncond_ct_embeddings.shape)
-
-        #print(ct_embeddings.shape)
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        bs_embed, seq_len, _ = ct_embeddings.shape
-        ct_embeddings  = ct_embeddings.repeat(1, num_images_per_prompt, 1)
-        ct_embeddings = ct_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
-        print("maped ct embeddings shape = ", ct_embeddings.shape)
-
-        bs_embed, seq_len, _ = uncond_ct_embeddings .shape
-        uncond_ct_embeddings  = uncond_ct_embeddings.repeat(1, num_images_per_prompt, 1)
-        uncond_ct_embeddings = uncond_ct_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
-        print("maped uncond ct embeddings shape = ", uncond_ct_embeddings.shape)
-
-        # get unconditional embeddings for classifier free guidance
-        if do_classifier_free_guidance:
-            ct_embeddings = torch.cat([uncond_ct_embeddings, ct_embeddings, ct_embeddings])
-
-        return ct_embeddings
+        return clip_hidden_states
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.decode_latents
     def decode_latents(self, latents):
@@ -481,9 +419,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             spine_marker = spine_marker.unsqueeze(0)
         else:
             batch_size = len(prompt)
-        if len(spine_marker.shape) == 3:
-            # add channel dimension
-            spine_marker = spine_marker.unsqueeze(1)
+        
         device = self._execution_device()
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -495,6 +431,19 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         embeddings = self._encode_frames(
             prompt, prev_frames, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
         )
+        
+        # Get VAE embeddings
+        net_ctrl_states = []
+        for i in range(self.preframe_num):
+            vae_hs = self.vae.encode(prev_frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
+            net_ctrl_states.append(vae_hs)
+        if len(spine_marker.shape) == 3:
+            # add channel dimension
+            spine_marker = spine_marker.unsqueeze(1)
+        spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
+        vae_sp = self.vae.encode(spine_marker.cuda().float()).latent_dist.sample() * 0.18215
+        net_ctrl_states.append(vae_sp)
+        net_ctrl_states = torch.cat(net_ctrl_states, 1)
 
         # 4. Preprocess frames
         last_frame = prev_frames[:,-1,:3]
@@ -516,7 +465,6 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         if sweep:
             s1_vals = [0, 3, 5, 7, 9] 
             s2_vals = [0, 3, 5, 7, 9]
-            images = [] # store frames
         else:
             s1_vals, s2_vals = [s1], [s2]
 
@@ -532,28 +480,13 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
 
                         # expand the latents if we are doing classifier free guidance
                         # 如果我们正在进行无分类器指导，则扩展潜变量
-                        latent_model_input = torch.cat([latents] * 3) if do_classifier_free_guidance else latents
-                        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                        latent_model_input = self.scheduler.scale_model_input(latents, t)
 
                         # Add spine_marker to noisy latents
-                        _, _, h, w = latent_model_input.shape
-                        if do_classifier_free_guidance:
-                            spine_marker_input = torch.cat([torch.zeros(spine_marker.shape), spine_marker, torch.zeros(spine_marker.shape)]) 
-                        else:
-                            spine_marker_input = spine_marker
-
-                        latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(spine_marker_input, (h,w)).cuda()), 1)
+                        latent_model_input = torch.cat((latent_model_input.cuda(), net_ctrl_states.cuda()), 1)
 
                         # predict the noise residual
                         noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample
-
-                        # perform guidance
-                        if do_classifier_free_guidance:
-                            #print(f"s1={s1}, s2={s2}")
-                            noise_pred_uncond, noise_pred_, noise_pred_img_only = noise_pred.chunk(3)
-                            noise_pred = noise_pred_uncond + \
-                                         s1 * (noise_pred_img_only - noise_pred_uncond) + \
-                                         s2 * (noise_pred_ - noise_pred_img_only) 
 
                         # compute the previous noisy sample x_t -> x_t-1
                         latents = self.scheduler.step(noise_pred.cuda(), t, latents.cuda(), **extra_step_kwargs).prev_sample
