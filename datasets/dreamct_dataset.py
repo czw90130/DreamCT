@@ -108,15 +108,29 @@ class CTdataProcessor:
         else: 
             return 'in a reverse sequence'
 
-    def dict_to_sentence(self, d):
-        short_spine = random.choice([True, False])
+    def dict_to_sentence(self, d, randomize=True):
+        if randomize:
+            age_digit = random.choice([True, False])
+            short_spine = random.choice([True, False])
+            short_plane = random.choice([True, False])
+        else:
+            age_digit = False
+            short_spine = False
+            short_plane = False
+        
         parts = {
-            'age': self.age_description(d['age'],digit=random.choice([True, False])) if 'age' in d else "",
+            'age': self.age_description(d['age'],digit=age_digit) if 'age' in d else "",
             'gender': self.gender_description(d['gender']) if 'gender' in d else "",
-            'plane': self.plane_full_name(d['plane'], short=random.choice([True, False])) if 'plane' in d else "",
+            'plane': self.plane_full_name(d['plane'], short=short_plane) if 'plane' in d else "",
             'spine_list': self.list_to_natural_language([self.spine_full_name(spine, short=short_spine) for spine in d['spines'].split('|')]) if 'spines' in d else "",
             'order': self.order_description(d['positive_order']),
         }
+        
+        if not randomize:
+            output = ''
+            for k, v in parts.items():
+                output += f"{k}:{v}, "
+            return output[:-2]
 
         templates = [
             f"{parts['age']} {parts['gender']} patient has observations {parts['order']} in the {parts['plane']} plane, including {parts['spine_list']}.",
@@ -167,10 +181,10 @@ class CTdataProcessor:
 
         return data
 
-    def __call__(self, ct_npz_path, plane, start_idx, slice_size=None, sample_num=3, positive_order=True):
-        return self.to_frame(ct_npz_path, plane, start_idx, slice_size, sample_num, positive_order)
+    def __call__(self, ct_npz_path, plane, start_idx, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True):
+        return self.to_frame(ct_npz_path, plane, start_idx, slice_size, sample_num, positive_order, randomize_sentence)
     
-    def to_frame(self, ct, plane, start_idx, slice_size=None, sample_num=3, positive_order=True):
+    def to_frame(self, ct, plane, start_idx, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True):
         if isinstance(ct, str):
             ct = self.load_npz(ct)
         slices = ct[plane]
@@ -208,7 +222,7 @@ class CTdataProcessor:
                 properties['spines'] = '|'.join(obj_tags)
         # sm_ch 归一化
         frames[:,sm_ch] = frames[:,sm_ch] / 12.5 - 1
-        properties['sentence'] = self.dict_to_sentence(properties)
+        properties['sentence'] = self.dict_to_sentence(properties, randomize=randomize_sentence)
         
         return frames, properties
         

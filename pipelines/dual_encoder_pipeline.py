@@ -176,8 +176,8 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
-    @property
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._execution_device
+    # @property
     def _execution_device(self):
         r"""
         Returns the device on which the pipeline's models will be executed. After calling
@@ -289,10 +289,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
     def decode_latents(self, latents):
         with autocast():
             latents = 1 / 0.18215 * latents
-            image = self.vae.decode(latents).sample
-            image = (image / 2 + 0.5).clamp(0, 1)
-            # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
-            image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+            image = self.vae.decode(latents).sample.clamp(-1, 1)
             return image
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
@@ -377,25 +374,6 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         latents = init_latents
 
         return latents
-    
-    @property
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._execution_device
-    def _execution_device(self):
-        r"""
-        Returns the device on which the pipeline's models will be executed. After calling
-        `pipeline.enable_sequential_cpu_offload()` the execution device can only be inferred from Accelerate's module
-        hooks.
-        """
-        if self.device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
-            return self.device
-        for module in self.unet.modules():
-            if (
-                hasattr(module, "_hf_hook")
-                and hasattr(module._hf_hook, "execution_device")
-                and module._hf_hook.execution_device is not None
-            ):
-                return torch.device(module._hf_hook.execution_device)
-        return self.device
 
     @torch.no_grad()
     def __call__(
@@ -405,9 +383,9 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         spine_marker: torch.FloatTensor = None,
         strength: float = 1.0,
         num_inference_steps: Optional[int] = 100,
-        guidance_scale: Optional[float] = 7.5,
-        s1: float = 1.0, # strength of input spine_marker
-        s2: float = 1.0, # strength of input prev_frames
+        guidance_scale: Optional[float] = 1,
+        s1: float = 0.0, # strength of input spine_marker
+        s2: float = 0.0, # strength of input prev_frames
         negative_prompt: Optional[Union[str, List[str]]] = "",
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = 0.0,
@@ -504,11 +482,12 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         if len(spine_marker.shape) == 3:
             # add channel dimension
             spine_marker = spine_marker.unsqueeze(1)
-        device = self._execution_device
+        device = self._execution_device()
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
-        do_classifier_free_guidance = guidance_scale > 1.0 or s1 > 0.0 or s2 > 0.0
+        # do_classifier_free_guidance = guidance_scale > 1.0 or s1 > 0.0 or s2 > 0.0
+        do_classifier_free_guidance = False
 
         # 3. Encode input image: [unconditional, condional, conditional]
         embeddings = self._encode_frames(
@@ -559,7 +538,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
                         if do_classifier_free_guidance:
                             spine_marker_input = torch.cat([torch.zeros(spine_marker.shape), spine_marker, torch.zeros(spine_marker.shape)]) 
                         else:
-                            spine_marker_input = torch.cat([spine_marker, spine_marker, spine_marker]) 
+                            spine_marker_input = spine_marker
 
                         latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(spine_marker_input, (h,w)).cuda()), 1)
 
@@ -590,22 +569,22 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
                 #print(len(image)) # 1
                 #print(image[0].shape) # 640, 512, 3
 
-                # 13. Convert to PIL
-                if output_type == "pil":
-                    image = self.numpy_to_pil(image)
+                # # 13. Convert to PIL
+                # if output_type == "pil":
+                #     image = self.numpy_to_pil(image)
 
-                if sweep:
-                    images.append(torchvision.transforms.ToTensor()(image[0]).clone())
+                # if sweep:
+                #     images.append(torchvision.transforms.ToTensor()(image[0]).clone())
 
-        # 13. If sweeping, convert images to grid
-        if sweep:
-            Grid = make_grid(images, nrow=len(s2_vals))
-            image = [torchvision.transforms.ToPILImage()(Grid)]
-            #image = Grid
-            #print("Grid complete.")
+        # # 13. If sweeping, convert images to grid
+        # if sweep:
+        #     Grid = make_grid(images, nrow=len(s2_vals))
+        #     image = [torchvision.transforms.ToPILImage()(Grid)]
+        #     #image = Grid
+        #     #print("Grid complete.")
+        return image
+        # if not return_dict:
+        #     return image
 
-        if not return_dict:
-            return image
-
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=False)
+        # return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=False)
 

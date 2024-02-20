@@ -5,3 +5,4 @@ model_stabilityai-stable-diffusion-2-inpainting/
 *.safetensors
 *.npz
 *.Identifier
+testdata/result/
