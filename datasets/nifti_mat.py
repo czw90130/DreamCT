@@ -354,7 +354,7 @@ class NIfTIEncoder(SentenceBuilder):
             # 读取OBJ模型
             obj_array, o_ext = self.load_obj_pack(obj_input_dir, nifti_array.shape, spacing, needs_extension)
             fdata_array = np.zeros((*obj_array.shape, 4), dtype=np.float16)
-        
+        self.result['meta']['origin_in_ext'] = o_ext
         sm_ch = self.result['meta']['spine_marker_channel']
         # 准备结果图像的数组
         
@@ -365,6 +365,8 @@ class NIfTIEncoder(SentenceBuilder):
         array_normalized = self.normalize_hu(nifti_array)
         array_fat_skl = self.normalize_fat_skl(nifti_array)
         array_tissue = self.normalize_tissue(nifti_array)
+
+        self.result['meta']['nifti_shape'] = nifti_array.shape
         
         # 横断面切片(Hor)
         depth = array_normalized.shape[0]
@@ -567,3 +569,29 @@ class NIfTIEncoder(SentenceBuilder):
         properties['sentence'] = self.dict_to_sentence(properties, randomize=randomize_sentence)
         
         return frames, properties
+    
+def combine_image(slice, meta):
+    red = ((slice[meta['hu_channel'],:,:] + 1) * 127.5).astype(np.uint8)
+    green = ((slice[meta['fat_skl_channel'],:,:] + 1) * 127.5).astype(np.uint8)
+    blue = ((slice[meta['tissue_channel'],:,:]+ 1) * 127.5).astype(np.uint8)
+    
+    green[slice[meta['spine_marker_channel'],:,:] > 0] = 255
+    blue[slice[meta['spine_marker_channel'],:,:] > 0] = 255
+
+    # 重排维度[C, H, W] -> [H, W, C]
+    red = np.transpose(red, (1, 2, 0))
+    green = np.transpose(green, (1, 2, 0))
+    blue = np.transpose(blue, (1, 2, 0))
+    
+    return cv2.merge([blue, green, red])
+
+if __name__ == "__main__":
+    import sys
+
+    nifti_path = sys.argv[1]
+    obj_input_dir = sys.argv[2]
+
+    encoder = NIfTIEncoder()
+
+    result = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    
