@@ -1,14 +1,15 @@
 import os
-import sys
+import torch
+import torch.nn.functional as F
+import numpy as np
 import cv2
 import open3d as o3d
-import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
 import random
-import torch
 
-class NIfTIEncoder:
+
+class SentenceBuilder:
     def age_description(self, age, digit=False):
         if digit:
             return str(age)
@@ -138,12 +139,16 @@ class NIfTIEncoder:
 
         # 随机选择一个模板并返回
         return random.choice(templates).replace("  ", " ").replace(",,", ",").strip()
+
+
+class NIfTIEncoder(SentenceBuilder):
     def __init__(self, hu_range=(-1000, 3000), voxel_size=1, fat_range=(-200, -25), cartilage_range=(200, 500), cortical_bone_range=(600, 3000), soft_tissue_range=(20, 200), obj_name_dict=None):
         self.hu_range = hu_range
         self.fat_range = fat_range
         self.cartilage_range = cartilage_range
         self.cortical_bone_range = cortical_bone_range
         self.soft_tissue_range = soft_tissue_range
+        self.voxel_size = voxel_size
         
         self.result = {
             'meta':{
@@ -215,7 +220,7 @@ class NIfTIEncoder:
 
         return self.load_dict(data)
     
-    def obj_to_voxel(self, mesh, array_shape, spacing):
+    def obj_to_voxel(self, mesh, array_shape, spacing, needs_extension):
         """
         使用 open3d 将 OBJ 网格转换为体素网格，并在每个体素周围根据 voxel_size 填充。
 
@@ -240,42 +245,43 @@ class NIfTIEncoder:
         max_coords = np.max(voxel_coords, axis=0)
         
         voxel_grid = np.zeros(array_shape, dtype=np.uint8)
+        origin_in_ext = np.array([0, 0, 0])
         
         # 确定是否需要扩展矩阵
-        needs_extension = np.any(min_coords < 0) or np.any(max_coords >= np.array(array_shape))
-        min_coords = np.minimum(min_coords, 0)
-        max_coords -= min_coords - 1
-        ext_voxel_grid = None
-        origin_in_ext = None
         if needs_extension:
+            needs_extension = np.any(min_coords < 0) or np.any(max_coords >= np.array(array_shape))
+            min_coords = np.minimum(min_coords, 0)
+            max_coords -= min_coords - 1
+            
             # 计算扩展矩阵的新尺寸
-            ext_voxel_grid = np.zeros(max_coords, dtype=np.uint8)
+            voxel_grid = np.zeros(max_coords, dtype=np.uint8)
             origin_in_ext = -min_coords  # 原点在扩展矩阵中的新位置
             
         offsets = np.arange(-self.voxel_size, self.voxel_size + 1)
         offset_arr = np.array(np.meshgrid(offsets, offsets, offsets)).T.reshape(-1,3)
 
         for voxel_coord in voxel_coords:
-            coords = voxel_coord + offset_arr
-            valid_coords = np.all((coords >= 0) & (coords < array_shape), axis=1)
-            voxel_grid[tuple(coords[valid_coords].T)] = 255
-            
             if needs_extension:
                 coords = voxel_coord - min_coords + offset_arr
                 valid_coords = np.all((coords >= 0) & (coords < max_coords), axis=1)
-                ext_voxel_grid[tuple(coords[valid_coords].T)] = 255
-
-        return voxel_grid, ext_voxel_grid, origin_in_ext
+                voxel_grid[tuple(coords[valid_coords].T)] = 255
+            else:
+                coords = voxel_coord + offset_arr
+                valid_coords = np.all((coords >= 0) & (coords < array_shape), axis=1)
+                voxel_grid[tuple(coords[valid_coords].T)] = 255
+            return voxel_grid, origin_in_ext
     
-    def load_obj_pack(self, obj_input_dir, nifti_shape, spacing):
-        rst_array = np.zeros(nifti_shape, dtype=np.float16)
+    def load_obj_pack(self, obj_input_dir, nifti_shape, spacing, needs_extension):
         
         # 初始化最终扩展矩阵和原点坐标
         final_ext_shape = np.array(nifti_shape)
         final_origin_in_ext = np.array([0, 0, 0])
         
         # 初始化扩展数组为 None，它将在需要时创建
-        ext_array = None
+        if needs_extension:
+            rst_array = None
+        else:
+            rst_array = np.zeros(nifti_shape, dtype=np.float16)
         
         # 遍历所有OBJ模型
         obj_paths = [os.path.join(obj_input_dir, obj_name) for obj_name in self.obj_name_dict.values()]
@@ -285,55 +291,54 @@ class NIfTIEncoder:
         pbar = tqdm(zip(obj_paths, index_values), total=len(obj_paths))
         for obj_path, index_value in pbar:
             mesh = self.read_obj_model(obj_path)
-            voxel_grid, ext_grid, ext_origin = self.obj_to_voxel(mesh, nifti_shape, spacing)
+            voxel_grid, ext_origin = self.obj_to_voxel(mesh, nifti_shape, spacing, needs_extension)
             
-            # 使用spine_marker通道表示OBJ模型
-            mask = voxel_grid > 0
-            rst_array[mask] = index_value
-            
-            if ext_grid is not None:
-                
-                if ext_array is None: # 如果这是第一个需要扩展的模型，初始化 ext_array
-                    ext_array = np.zeros_like(ext_grid, dtype=np.float16)
-                    final_ext_shape = ext_grid.shape
-                    final_origin_in_ext = ext_origin
+            if not needs_extension:
+                # 使用spine_marker通道表示OBJ模型
+                mask = voxel_grid > 0
+                rst_array[mask] = index_value
+            else:
+                if ext_origin is not None:
                     
-                    mask = ext_grid > 0
-                    ext_array[mask] = index_value
-                    
-                else: # 如果已经初始化了 ext_array
-                    # 计算新的扩展矩阵的最小和最大坐标
-                    new_min_coords = np.minimum(final_origin_in_ext, ext_origin)
-                    new_max_coords = np.maximum(final_origin_in_ext + final_ext_shape, ext_origin + ext_grid.shape)
-                    new_shape = new_max_coords - new_min_coords
-                    new_origin_in_ext = new_min_coords
-                    
-                    # 创建新的扩展矩阵
-                    new_ext_array = np.zeros(new_shape, dtype=np.float16)
-                    offset_a = new_origin_in_ext - final_origin_in_ext
-                    
-                    new_ext_array[offset_a[0]:offset_a[0]+final_ext_shape[0],
-                                  offset_a[1]:offset_a[1]+final_ext_shape[1],
-                                  offset_a[2]:offset_a[2]+final_ext_shape[2]] = ext_array
-                    
-                    ext_array = new_ext_array
-                    offset_g = new_origin_in_ext - ext_origin
-                    mask = ext_grid > 0
-                    
-                    ext_array[offset_g[0]:offset_g[0]+ext_grid.shape[0],
-                            offset_g[1]:offset_g[1]+ext_grid.shape[1],
-                            offset_g[2]:offset_g[2]+ext_grid.shape[2]][mask] = index_value
-                    
-                    final_ext_shape = new_shape
-                    final_origin_in_ext = new_origin_in_ext
-                    
-                
+                    if rst_array is None: # 如果这是第一个需要扩展的模型，初始化 rst_array
+                        rst_array = np.zeros_like(voxel_grid, dtype=np.float16)
+                        final_ext_shape = voxel_grid.shape
+                        final_origin_in_ext = ext_origin
+                        
+                        mask = voxel_grid > 0
+                        rst_array[mask] = index_value
+                        
+                    else: # 如果已经初始化了 rst_array
+                        # 计算新的扩展矩阵的最小和最大坐标
+                        new_min_coords = np.minimum(final_origin_in_ext, ext_origin)
+                        new_max_coords = np.maximum(final_origin_in_ext + final_ext_shape, ext_origin + voxel_grid.shape)
+                        new_shape = new_max_coords - new_min_coords
+                        new_origin_in_ext = new_min_coords
+                        
+                        # 创建新的扩展矩阵
+                        new_ext_array = np.zeros(new_shape, dtype=np.float16)
+                        offset_a = new_origin_in_ext - final_origin_in_ext
+                        
+                        new_ext_array[offset_a[0]:offset_a[0]+final_ext_shape[0],
+                                    offset_a[1]:offset_a[1]+final_ext_shape[1],
+                                    offset_a[2]:offset_a[2]+final_ext_shape[2]] = rst_array
+                        
+                        rst_array = new_ext_array
+                        offset_g = new_origin_in_ext - ext_origin
+                        mask = voxel_grid > 0
+                        
+                        rst_array[offset_g[0]:offset_g[0]+voxel_grid.shape[0],
+                                offset_g[1]:offset_g[1]+voxel_grid.shape[1],
+                                offset_g[2]:offset_g[2]+voxel_grid.shape[2]][mask] = index_value
+                        
+                        final_ext_shape = new_shape
+                        final_origin_in_ext = new_origin_in_ext
 
         self.result['meta']['spine_marker_channel'] = 3
         
-        return rst_array, ext_array, final_origin_in_ext
+        return rst_array, final_origin_in_ext
         
-    def __call__(self, nifti_path, obj_input_dir=None,  ex_meta_info=None):
+    def __call__(self, nifti_path, obj_input_dir=None,  ex_meta_info=None, needs_extension=False):
         if ex_meta_info is not None:
             for key, val in ex_meta_info.items():
                 self.result['meta'][key] = val
@@ -342,12 +347,14 @@ class NIfTIEncoder:
         nifti_img = sitk.ReadImage(nifti_path)
         nifti_array = sitk.GetArrayFromImage(nifti_img)
         spacing = np.array(nifti_img.GetSpacing())
-        
+
+        fdata_array = np.zeros((*nifti_array.shape, 4), dtype=np.float16)
+        o_ext = np.array([0, 0, 0])
         if obj_input_dir is not None:
             # 读取OBJ模型
-            obj_array,_,_ = self.load_obj_pack(obj_input_dir, nifti_array.shape, spacing)
+            obj_array, o_ext = self.load_obj_pack(obj_input_dir, nifti_array.shape, spacing, needs_extension)
+            fdata_array = np.zeros((*obj_array.shape, 4), dtype=np.float16)
         
-        fdata_array = np.zeros((*nifti_array.shape, 4), dtype=np.float16)
         sm_ch = self.result['meta']['spine_marker_channel']
         # 准备结果图像的数组
         
@@ -362,14 +369,17 @@ class NIfTIEncoder:
         # 横断面切片(Hor)
         depth = array_normalized.shape[0]
         hor_start_idx = 0
-        hor_end_idx = depth
+        hor_end_idx = -1
         pbar = tqdm(range(depth))
         for i in pbar:
-            fdata_slice = fdata_array[i, :, :, :]
+            fdata_slice = fdata_array[i+o_ext[0], o_ext[1]:, o_ext[2]:, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
-                    hor_start_idx += 1
-                    continue
+                    if hor_end_idx < 0:
+                        hor_start_idx += 1
+                        continue
+                    else:
+                        break
             
             fdata_slice[:, :, self.result['meta']['hu_channel']] = array_normalized[i, :, :]
             fdata_slice[:, :, self.result['meta']['fat_skl_channel']] = array_fat_skl[i, :, :]
@@ -383,7 +393,7 @@ class NIfTIEncoder:
         width = array_normalized.shape[2]
         pbar = tqdm(range(width))
         for i in pbar:
-            fdata_slice = fdata_array[hor_end_idx:hor_start_idx:-1, :, i, :]
+            fdata_slice = fdata_array[hor_end_idx+o_ext[0]:hor_start_idx+o_ext[0]:-1, o_ext[1]:, o_ext[2]+i, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
                     continue
@@ -399,7 +409,7 @@ class NIfTIEncoder:
         height = array_normalized.shape[1]
         pbar = tqdm(range(height))
         for i in pbar:
-            fdata_slice = fdata_array[hor_end_idx:hor_start_idx:-1, i, :, :]
+            fdata_slice = fdata_array[hor_end_idx+o_ext[0]:hor_start_idx+o_ext[0]:-1, o_ext[1]+i, o_ext[2]:, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
                     continue
@@ -523,19 +533,22 @@ class NIfTIEncoder:
         return frames
         
     
-    def to_frame(self, plane, start_idx, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True, cat_prev_frame=True):
-        slices = self.result[plane]
-        sm_ch = self.result['meta']['spine_marker_channel']
+    def to_frame(self, plane, start_idx, ct=None, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True, cat_prev_frame=True):
+        if ct is None:
+            ct = self.result
+        
+        slices = ct[plane]
+        sm_ch = ct['meta']['spine_marker_channel']
         properties = {
         'plane': plane[:-7], 
         'positive_order': positive_order, 
         'spines': '',
         'original_sizes': slices[0].shape[:2]
         }
-        if 'age' in self.result['meta']:
-            properties['age'] = self.result['meta']['age']
-        if 'gender' in self.result['meta']:
-            properties['gender'] = self.result['meta']['gender']
+        if 'age' in ct['meta']:
+            properties['age'] = ct['meta']['age']
+        if 'gender' in ct['meta']:
+            properties['gender'] = ct['meta']['gender']
         
         # 假设slices是一个NumPy数组，形状为[切片数量, 高度, 宽度, 通道数]
         all_slices = torch.from_numpy(slices[start_idx:start_idx+sample_num]).to(torch.float32)  # 转换为torch张量
@@ -545,7 +558,7 @@ class NIfTIEncoder:
         
         # 获取存在的脊柱tag
         obj_tags = []
-        for obj_tag, index_value in self.result['meta']['spine_marker'].items():
+        for obj_tag, index_value in ct['meta']['spine_marker'].items():
             if index_value in frames[-1,sm_ch]:
                 obj_tags.append(obj_tag)
                 properties['spines'] = '|'.join(obj_tags)
