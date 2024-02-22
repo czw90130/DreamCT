@@ -157,11 +157,6 @@ class CTdataProcessor:
             f"{parts['spine_list']}, {parts['plane']} plane {parts['order']}.",
             ""
         ]
-        
-        # 确保至少有一个部分填充
-        filled_templates = [t for t in templates if any(parts.values())]
-        if not filled_templates:
-            return "Patient details are not fully specified."
 
         # 随机选择一个模板并返回
         return random.choice(templates).replace("  ", " ").replace(",,", ",").strip()
