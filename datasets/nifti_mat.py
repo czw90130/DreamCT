@@ -516,17 +516,18 @@ class NIfTIEncoder(SentenceBuilder):
             # 计算裁剪的方块数量
             num_blocks = random.randint(0, 5)
             for _ in range(num_blocks):
-                # 随机选择一个方块
-                block_h = random.randint(0, slice_size // 2)
-                block_w = random.randint(0, slice_size // 2)
-                # 设置这个方块为 0
                 if random.random() < 0.5:
+                    # 随机选择一个方块
+                    block_h = random.randint(0, slice_size - 1)
+                    block_w = random.randint(0, slice_size - 1)
                     # 随机选择一个起点
-                    end_h = random.randint(block_h, slice_size // 2)
-                    end_w = random.randint(block_w, slice_size // 2)
+                    end_h = random.randint(block_h, slice_size)
+                    end_w = random.randint(block_w, slice_size)
                     frames[:-1, :3, block_h:end_h, block_w:end_w] = -1
                 else:
                 # 随机选择一个边缘并裁剪一定的宽度
+                    block_h = random.randint(0, slice_size // 2)
+                    block_w = random.randint(0, slice_size // 2)
                     edge = random.choice(['top', 'bottom', 'left', 'right'])
                     if edge == 'top':
                         frames[:-1, :3, :block_h, :] = -1
@@ -559,9 +560,13 @@ class NIfTIEncoder(SentenceBuilder):
         
         # 假设slices是一个NumPy数组，形状为[切片数量, 高度, 宽度, 通道数]
         if positive_order:
-            all_slices = torch.from_numpy(np.asarray(slices[start_idx:start_idx+sample_num])).to(torch.float32)  # 转换为torch张量
+            all_slices = np.asarray(slices[start_idx:start_idx+sample_num])
+            all_slices = torch.from_numpy(all_slices).to(torch.float32)  # 转换为torch张量
         else:
-            all_slices = torch.from_numpy(np.asarray(slices[start_idx:start_idx-sample_num:-1])).to(torch.float32)
+            if start_idx-sample_num < 0:
+                start_idx = sample_num
+            all_slices = np.array(slices[start_idx:start_idx-sample_num:-1])
+            all_slices = torch.from_numpy(all_slices).to(torch.float32)
         all_slices = all_slices.permute(0, 3, 1, 2)  # 重排维度为[B, C, H, W]
         
         frames = self.interpolate_frames(all_slices, slice_size, cat_prev_frame)

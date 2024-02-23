@@ -228,11 +228,11 @@ def main(args):
                 target_latents = vae.encode(target_frames[:, :3].to(dtype=weight_dtype)).latent_dist.sample()
                 target_latents = target_latents * 0.18215
 
-                pred_latents = 1 / 0.18215 * target_latents
-                pred_frames = vae.decode(pred_latents).sample
-                pred_frames = pred_frames.clamp(-1, 1)
+                # pred_latents = 1 / 0.18215 * target_latents
+                # pred_frames = vae.decode(pred_latents).sample
+                # pred_frames = pred_frames.clamp(-1, 1)
 
-                vae_loss = F.mse_loss(pred_frames.float(), target_frames[:, :3].clamp(-1, 1).float(), reduction="mean")
+                # vae_loss = F.mse_loss(pred_frames.float(), target_frames[:, :3].clamp(-1, 1).float(), reduction="mean")
 
                 # for i in range(batch[0].shape[1]-1):
                 #     w = (batch[0].shape[1]-i-1) * 0.01
@@ -259,10 +259,11 @@ def main(args):
                 # Get VAE embeddings
                 vae_hidden_states = []
                 for i in range(args.preframe_num):
-                    vae_hs = vae.encode(batch[0][:,i,:3].to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
+                    frame = batch[0][:,i,[0,3,3]].to(device=target_latents.device, dtype=weight_dtype)
+                    vae_hs = vae.encode(frame).latent_dist.sample() * 0.18215
                     vae_hidden_states.append(vae_hs)
                 spine_marker = target_frames[:,3].unsqueeze(1)
-                spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
+                spine_marker = torch.cat([torch.zeros_like(spine_marker), spine_marker, spine_marker], 1)
                 vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
                 vae_hidden_states.append(vae_sp)
                 vae_hidden_states = torch.cat(vae_hidden_states, 1)
@@ -305,7 +306,7 @@ def main(args):
                 else:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-                loss = loss + vae_loss
+                # loss = loss + vae_loss
                 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -338,7 +339,7 @@ def main(args):
                     tgt_images = latents2img(tgt_latents)
                     
                     noise_viz = latents2img(noisy_latents[:,:4,:,:])
-                    decode_vis = inputs2img(pred_frames)
+                    # decode_vis = inputs2img(pred_frames)
                     
                     target = inputs2img(target_frames[:,:3])
                     input_img = inputs2img(batch[0][:,-2,:3])
@@ -348,9 +349,10 @@ def main(args):
                     writer.add_image(f'train/2pred_img', pred_images[0], global_step=global_step)
                     writer.add_image(f'train/3tgt_img', tgt_images[0], global_step=global_step)
                     writer.add_image(f'train/4target', target[0], global_step=global_step)
-                    writer.add_image(f'train/5decode_vis', decode_vis[0], global_step=global_step)
+                    # writer.add_image(f'train/5decode_vis', decode_vis[0], global_step=global_step)
 
-            logs = {"loss": loss.detach().item(),"vae_loss":vae_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            # logs = {"loss": loss.detach().item(),"vae_loss":vae_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             
@@ -380,12 +382,12 @@ def main(args):
                 progress_bar.set_description(f"saveing models: unet.pth")
                 model_path = os.path.join(checkpoint_path, 'unet.pth')
                 torch.save(unet.state_dict(), model_path)
-                progress_bar.set_description("saveing models: adapter.pth")
+                # progress_bar.set_description("saveing models: adapter.pth")
                 # adapter_path = os.path.join(checkpoint_path, 'adapter.pth')
                 # torch.save(adapter.state_dict(), adapter_path)
-                progress_bar.set_description("saveing models: vae.pth")
-                vae_path = os.path.join(checkpoint_path,'vae.pth')
-                torch.save(vae.state_dict(), vae_path)
+                # progress_bar.set_description("saveing models: vae.pth")
+                # vae_path = os.path.join(checkpoint_path,'vae.pth')
+                # torch.save(vae.state_dict(), vae_path)
                 progress_bar.set_description("")
             first_batch = False
         accelerator.wait_for_everyone()

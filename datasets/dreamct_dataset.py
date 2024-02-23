@@ -6,7 +6,7 @@ from collections import OrderedDict
 import random
 import time
 import gc
-from nifti_mat import NIfTIEncoder
+from .nifti_mat import NIfTIEncoder
 
 '''
 读取CT切片数据
