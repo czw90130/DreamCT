@@ -252,10 +252,12 @@ class NIfTIEncoder(SentenceBuilder):
             needs_extension = np.any(min_coords < 0) or np.any(max_coords >= np.array(array_shape))
             min_coords = np.minimum(min_coords, 0)
             max_coords -= min_coords - 1
+            max_coords = np.maximum(max_coords, array_shape)
             
             # 计算扩展矩阵的新尺寸
             voxel_grid = np.zeros(max_coords, dtype=np.uint8)
             origin_in_ext = -min_coords  # 原点在扩展矩阵中的新位置
+            array_shape = max_coords
             
         offsets = np.arange(-self.voxel_size, self.voxel_size + 1)
         offset_arr = np.array(np.meshgrid(offsets, offsets, offsets)).T.reshape(-1,3)
@@ -263,13 +265,12 @@ class NIfTIEncoder(SentenceBuilder):
         for voxel_coord in voxel_coords:
             if needs_extension:
                 coords = voxel_coord - min_coords + offset_arr
-                valid_coords = np.all((coords >= 0) & (coords < max_coords), axis=1)
-                voxel_grid[tuple(coords[valid_coords].T)] = 255
             else:
                 coords = voxel_coord + offset_arr
-                valid_coords = np.all((coords >= 0) & (coords < array_shape), axis=1)
-                voxel_grid[tuple(coords[valid_coords].T)] = 255
-            return voxel_grid, origin_in_ext
+            valid_coords = np.all((coords >= 0) & (coords < array_shape), axis=1)
+            voxel_grid[tuple(coords[valid_coords].T)] = 255
+            
+        return voxel_grid, origin_in_ext
     
     def load_obj_pack(self, obj_input_dir, nifti_shape, spacing, needs_extension):
         
@@ -348,54 +349,58 @@ class NIfTIEncoder(SentenceBuilder):
         nifti_array = sitk.GetArrayFromImage(nifti_img)
         spacing = np.array(nifti_img.GetSpacing())
 
-        fdata_array = np.zeros((*nifti_array.shape, 4), dtype=np.float16)
+        fdata_array = np.ones((*nifti_array.shape, 4), dtype=np.float16) * -1
+        print(fdata_array.shape)
         o_ext = np.array([0, 0, 0])
+        sm_ch = None
         if obj_input_dir is not None:
             # 读取OBJ模型
             obj_array, o_ext = self.load_obj_pack(obj_input_dir, nifti_array.shape, spacing, needs_extension)
-            fdata_array = np.zeros((*obj_array.shape, 4), dtype=np.float16)
-        self.result['meta']['origin_in_ext'] = o_ext
-        sm_ch = self.result['meta']['spine_marker_channel']
-        # 准备结果图像的数组
-        
-        if sm_ch is not None:
+            sm_ch = self.result['meta']['spine_marker_channel']
+            fdata_array = np.ones((*obj_array.shape[:3], 4), dtype=np.float16) * -1
+            print(fdata_array.shape)
+            print(sm_ch)
             fdata_array[:,:,:,sm_ch] = obj_array
-            
-        # 将NIfTI图像数据进行归一化
-        array_normalized = self.normalize_hu(nifti_array)
-        array_fat_skl = self.normalize_fat_skl(nifti_array)
-        array_tissue = self.normalize_tissue(nifti_array)
+            self.result['meta']['origin_in_ext'] = o_ext
+        
+        # 将NIfTI图像数据进行归一化并整体赋值
+        fdata_array[o_ext[0]:o_ext[0]+nifti_array.shape[0],
+                    o_ext[1]:o_ext[1]+nifti_array.shape[1],
+                    o_ext[2]:o_ext[2]+nifti_array.shape[2],
+                    self.result['meta']['hu_channel']] = self.normalize_hu(nifti_array)
+        fdata_array[o_ext[0]:o_ext[0]+nifti_array.shape[0],
+                    o_ext[1]:o_ext[1]+nifti_array.shape[1],
+                    o_ext[2]:o_ext[2]+nifti_array.shape[2],
+                    self.result['meta']['fat_skl_channel']] = self.normalize_fat_skl(nifti_array)
+        fdata_array[o_ext[0]:o_ext[0]+nifti_array.shape[0],
+                    o_ext[1]:o_ext[1]+nifti_array.shape[1],
+                    o_ext[2]:o_ext[2]+nifti_array.shape[2],
+                    self.result['meta']['tissue_channel']] = self.normalize_tissue(nifti_array)
 
         self.result['meta']['nifti_shape'] = nifti_array.shape
         
         # 横断面切片(Hor)
-        depth = array_normalized.shape[0]
+        depth = fdata_array.shape[0]
         hor_start_idx = 0
         hor_end_idx = -1
         pbar = tqdm(range(depth))
         for i in pbar:
-            fdata_slice = fdata_array[i+o_ext[0], o_ext[1]:, o_ext[2]:, :]
+            fdata_slice = fdata_array[i, :, :, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
                     if hor_end_idx < 0:
                         hor_start_idx += 1
                         continue
-                    else:
-                        break
-            
-            fdata_slice[:, :, self.result['meta']['hu_channel']] = array_normalized[i, :, :]
-            fdata_slice[:, :, self.result['meta']['fat_skl_channel']] = array_fat_skl[i, :, :]
-            fdata_slice[:, :, self.result['meta']['tissue_channel']] = array_tissue[i, :, :]
 
             self.result['hor_slices'].append(fdata_slice.astype(np.float16))
             hor_end_idx = i
             pbar.set_description(f'Hor: {i-hor_start_idx:04d}')
 
         # 矢状面切片(Sag)
-        width = array_normalized.shape[2]
+        width = fdata_array.shape[2]
         pbar = tqdm(range(width))
         for i in pbar:
-            fdata_slice = fdata_array[hor_end_idx+o_ext[0]:hor_start_idx+o_ext[0]:-1, o_ext[1]:, o_ext[2]+i, :]
+            fdata_slice = fdata_array[hor_end_idx:hor_start_idx:-1, :, i, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
                     continue
@@ -408,10 +413,10 @@ class NIfTIEncoder(SentenceBuilder):
             pbar.set_description(f'Sag: {i}')
 
         # 冠状面切片(Cor)    
-        height = array_normalized.shape[1]
+        height = fdata_array.shape[1]
         pbar = tqdm(range(height))
         for i in pbar:
-            fdata_slice = fdata_array[hor_end_idx+o_ext[0]:hor_start_idx+o_ext[0]:-1, o_ext[1]+i, o_ext[2]:, :]
+            fdata_slice = fdata_array[hor_end_idx:hor_start_idx:-1, i, :, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
                     continue
@@ -571,22 +576,17 @@ class NIfTIEncoder(SentenceBuilder):
         return frames, properties
     
 def combine_image(slice, meta):
-    red = ((slice[meta['hu_channel'],:,:] + 1) * 127.5).astype(np.uint8)
-    green = ((slice[meta['fat_skl_channel'],:,:] + 1) * 127.5).astype(np.uint8)
-    blue = ((slice[meta['tissue_channel'],:,:]+ 1) * 127.5).astype(np.uint8)
+    red = ((slice[:,:,meta['hu_channel']] + 1) * 127.5).astype(np.uint8)
+    green = ((slice[:,:,meta['fat_skl_channel']] + 1) * 127.5).astype(np.uint8)
+    blue = ((slice[:,:,meta['tissue_channel']]+ 1) * 127.5).astype(np.uint8)
     
-    green[slice[meta['spine_marker_channel'],:,:] > 0] = 255
-    blue[slice[meta['spine_marker_channel'],:,:] > 0] = 255
-
-    # 重排维度[C, H, W] -> [H, W, C]
-    red = np.transpose(red, (1, 2, 0))
-    green = np.transpose(green, (1, 2, 0))
-    blue = np.transpose(blue, (1, 2, 0))
-    
+    green[slice[:,:,meta['spine_marker_channel']] > 0] = 255
+    blue[slice[:,:,meta['spine_marker_channel']] > 0] = 255
     return cv2.merge([blue, green, red])
 
 if __name__ == "__main__":
     import sys
+    import imageio
 
     nifti_path = sys.argv[1]
     obj_input_dir = sys.argv[2]
@@ -594,4 +594,22 @@ if __name__ == "__main__":
     encoder = NIfTIEncoder()
 
     result = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    print('Dict Result:')
+    print(result['meta'])
+    print(len(result['hor_slices']), result['hor_slices'][0].shape)
+    print(len(result['sag_slices']), result['sag_slices'][0].shape)
+    print(len(result['cor_slices']), result['cor_slices'][0].shape)
     
+    hor_imgs = []
+    for slice in result['hor_slices']:
+        hor_imgs.append(combine_image(slice, result['meta']))
+    imageio.mimsave('hor_slices.gif', hor_imgs, fps=10)
+    sag_imgs = []
+    for slice in result['sag_slices']:
+        sag_imgs.append(combine_image(slice, result['meta']))
+    imageio.mimsave('sag_slices.gif', sag_imgs, fps=5)
+    cor_imgs = []
+    for slice in result['cor_slices']:
+        cor_imgs.append(combine_image(slice, result['meta']))
+    imageio.mimsave('cor_slices.gif', cor_imgs, fps=5)
+     
