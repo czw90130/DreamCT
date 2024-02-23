@@ -219,7 +219,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             input_ids = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).input_ids
             input_ids = input_ids.cuda()
             clip_hidden_states = self.text_encoder(input_ids).last_hidden_state
-            print("clip states shape = ", clip_hidden_states.shape)
+            # print("clip states shape = ", clip_hidden_states.shape)
 
         return clip_hidden_states
 
@@ -278,11 +278,11 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         """
         with autocast():
             image = image.to(device=device, dtype=dtype).cuda()
-            print("Image Shape = ", image.shape)
+            # print("Image Shape = ", image.shape)
             init_latent_dist = self.vae.encode(image).latent_dist
             init_latents = init_latent_dist.sample(generator=generator)
             init_latents = 0.18215 * init_latents
-            print("Init Latents Shape = ", init_latents.shape)
+            # print("Init Latents Shape = ", init_latents.shape)
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
@@ -446,7 +446,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         net_ctrl_states = torch.cat(net_ctrl_states, 1)
 
         # 4. Preprocess frames
-        last_frame = prev_frames[:,-1,:3]
+        last_frame = torch.zeros_like(prev_frames[:,-1,:3])
 
         # 6. Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -474,28 +474,28 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             for s2 in s2_vals:
                 latents = copy_latents.clone()
                 num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-                with self.progress_bar(total=num_inference_steps) as progress_bar:
-                    for i, t in enumerate(timesteps):
-                        t = t.cuda()
+                # with self.progress_bar(total=num_inference_steps) as progress_bar:
+                for i, t in enumerate(timesteps):
+                    t = t.cuda()
 
-                        # expand the latents if we are doing classifier free guidance
-                        # 如果我们正在进行无分类器指导，则扩展潜变量
-                        latent_model_input = self.scheduler.scale_model_input(latents, t)
+                    # expand the latents if we are doing classifier free guidance
+                    # 如果我们正在进行无分类器指导，则扩展潜变量
+                    latent_model_input = self.scheduler.scale_model_input(latents, t)
 
-                        # Add spine_marker to noisy latents
-                        latent_model_input = torch.cat((latent_model_input.cuda(), net_ctrl_states.cuda()), 1)
+                    # Add spine_marker to noisy latents
+                    latent_model_input = torch.cat((latent_model_input.cuda(), net_ctrl_states.cuda()), 1)
 
-                        # predict the noise residual
-                        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample
+                    # predict the noise residual
+                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample
 
-                        # compute the previous noisy sample x_t -> x_t-1
-                        latents = self.scheduler.step(noise_pred.cuda(), t, latents.cuda(), **extra_step_kwargs).prev_sample
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents = self.scheduler.step(noise_pred.cuda(), t, latents.cuda(), **extra_step_kwargs).prev_sample
 
-                        # call the callback, if provided
-                        if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                            progress_bar.update()
-                            if callback is not None and i % callback_steps == 0:
-                                callback(i, t, latents)
+                    # call the callback, if provided
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        # progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            callback(i, t, latents)
 
                 # 11. Post-processing
                 latents = latents[:,:4, :, :].cuda() #.float()

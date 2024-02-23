@@ -7,6 +7,7 @@ import open3d as o3d
 import SimpleITK as sitk
 from tqdm import tqdm
 import random
+from copy import deepcopy
 
 
 class SentenceBuilder:
@@ -106,7 +107,8 @@ class SentenceBuilder:
         if not randomize:
             output = ''
             for k, v in parts.items():
-                output += f"{k}:{v}, "
+                if v != '':
+                    output += f"{k}:{v}, "
             return output[:-2]
 
         templates = [
@@ -350,7 +352,6 @@ class NIfTIEncoder(SentenceBuilder):
         spacing = np.array(nifti_img.GetSpacing())
 
         fdata_array = np.ones((*nifti_array.shape, 4), dtype=np.float16) * -1
-        print(fdata_array.shape)
         o_ext = np.array([0, 0, 0])
         sm_ch = None
         if obj_input_dir is not None:
@@ -358,8 +359,6 @@ class NIfTIEncoder(SentenceBuilder):
             obj_array, o_ext = self.load_obj_pack(obj_input_dir, nifti_array.shape, spacing, needs_extension)
             sm_ch = self.result['meta']['spine_marker_channel']
             fdata_array = np.ones((*obj_array.shape[:3], 4), dtype=np.float16) * -1
-            print(fdata_array.shape)
-            print(sm_ch)
             fdata_array[:,:,:,sm_ch] = obj_array
             self.result['meta']['origin_in_ext'] = o_ext
         
@@ -377,29 +376,34 @@ class NIfTIEncoder(SentenceBuilder):
                     o_ext[2]:o_ext[2]+nifti_array.shape[2],
                     self.result['meta']['tissue_channel']] = self.normalize_tissue(nifti_array)
 
-        self.result['meta']['nifti_shape'] = nifti_array.shape
+        self.result['meta']['nifti_shape'] = np.array(nifti_array.shape)
         
         # 横断面切片(Hor)
         depth = fdata_array.shape[0]
         hor_start_idx = 0
         hor_end_idx = -1
-        pbar = tqdm(range(depth))
-        for i in pbar:
+
+        for i in range(depth):
             fdata_slice = fdata_array[i, :, :, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
                     if hor_end_idx < 0:
                         hor_start_idx += 1
                         continue
+                    else:
+                        break
 
             self.result['hor_slices'].append(fdata_slice.astype(np.float16))
             hor_end_idx = i
-            pbar.set_description(f'Hor: {i-hor_start_idx:04d}')
+
+        # print('Hor:', hor_start_idx, hor_end_idx)
+        self.result['meta']['nifti_shape'][0] -= hor_start_idx
 
         # 矢状面切片(Sag)
         width = fdata_array.shape[2]
-        pbar = tqdm(range(width))
-        for i in pbar:
+        # TODO: Sag 和 Cor 的start_idx 和 end_idx 需要根据脊柱标记来确定并考虑是否更新 origin_in_ext nifti_shape
+
+        for i in range(width):
             fdata_slice = fdata_array[hor_end_idx:hor_start_idx:-1, :, i, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
@@ -409,13 +413,11 @@ class NIfTIEncoder(SentenceBuilder):
                 self.result['meta']['sag_start_idx'] = i
 
             self.result['sag_slices'].append(fdata_slice.astype(np.float16))
-            
-            pbar.set_description(f'Sag: {i}')
 
         # 冠状面切片(Cor)    
         height = fdata_array.shape[1]
-        pbar = tqdm(range(height))
-        for i in pbar:
+
+        for i in range(height):
             fdata_slice = fdata_array[hor_end_idx:hor_start_idx:-1, i, :, :]
             if sm_ch is not None:
                 if fdata_slice[:,:,sm_ch].max() == 0: # 跳过空白切片
@@ -425,8 +427,6 @@ class NIfTIEncoder(SentenceBuilder):
                 self.result['meta']['cor_start_idx'] = i
 
             self.result['cor_slices'].append(fdata_slice.astype(np.float16))
-            
-            pbar.set_description(f'Cor: {i}')
             
         # 更新meta信息
         self.result['meta']['hor_slices_num'] = len(self.result['hor_slices'])
@@ -439,11 +439,11 @@ class NIfTIEncoder(SentenceBuilder):
         """
         将HU值归一化到-1到1的浮点数范围。
         """
-        print('Before normalize:', hu_image.min(), hu_image.max())
+        # print('Before normalize:', hu_image.min(), hu_image.max())
         # 将HU值从[hu_min, hu_max]范围映射到[-1, 1]
         hu_range = self.hu_range[1] - self.hu_range[0]
         normalized = 2 * ((hu_image - self.hu_range[0]) / hu_range) - 1
-        print('After normalize:', normalized.min(), normalized.max())
+        # print('After normalize:', normalized.min(), normalized.max())
         # 截断超过-1到1的值
         normalized[normalized < -1] = -1
         normalized[normalized > 1] = 1
@@ -540,7 +540,7 @@ class NIfTIEncoder(SentenceBuilder):
         return frames
         
     
-    def to_frame(self, plane, start_idx, ct=None, slice_size=None, sample_num=3, positive_order=True, randomize_sentence=True, cat_prev_frame=True):
+    def to_frame(self, plane, start_idx, ct=None, slice_size=None, sample_num=4, positive_order=True, randomize_sentence=True, cat_prev_frame=True):
         if ct is None:
             ct = self.result
         
@@ -558,7 +558,10 @@ class NIfTIEncoder(SentenceBuilder):
             properties['gender'] = ct['meta']['gender']
         
         # 假设slices是一个NumPy数组，形状为[切片数量, 高度, 宽度, 通道数]
-        all_slices = torch.from_numpy(slices[start_idx:start_idx+sample_num]).to(torch.float32)  # 转换为torch张量
+        if positive_order:
+            all_slices = torch.from_numpy(np.asarray(slices[start_idx:start_idx+sample_num])).to(torch.float32)  # 转换为torch张量
+        else:
+            all_slices = torch.from_numpy(np.asarray(slices[start_idx:start_idx-sample_num:-1])).to(torch.float32)
         all_slices = all_slices.permute(0, 3, 1, 2)  # 重排维度为[B, C, H, W]
         
         frames = self.interpolate_frames(all_slices, slice_size, cat_prev_frame)
@@ -576,12 +579,22 @@ class NIfTIEncoder(SentenceBuilder):
         return frames, properties
     
 def combine_image(slice, meta):
-    red = ((slice[:,:,meta['hu_channel']] + 1) * 127.5).astype(np.uint8)
-    green = ((slice[:,:,meta['fat_skl_channel']] + 1) * 127.5).astype(np.uint8)
-    blue = ((slice[:,:,meta['tissue_channel']]+ 1) * 127.5).astype(np.uint8)
+    # 硬拷贝
+    aslice = deepcopy(slice)
+    if aslice.shape[0] < 5: # [C, H, W] -> [H, W, C]
+        aslice = aslice.permute(1, 2, 0)
+    if isinstance(aslice, torch.Tensor):
+        aslice = aslice.cpu().numpy()
+    if np.any(aslice[:,:,meta['spine_marker_channel']] < 0):
+        aslice[:,:,meta['spine_marker_channel']] += 1
+        
+    red = ((aslice[:,:,meta['hu_channel']] + 1) * 127.5).astype(np.uint8)
+    green = ((aslice[:,:,meta['fat_skl_channel']] + 1) * 127.5).astype(np.uint8)
+    blue = ((aslice[:,:,meta['tissue_channel']]+ 1) * 127.5).astype(np.uint8)
     
-    green[slice[:,:,meta['spine_marker_channel']] > 0] = 255
-    blue[slice[:,:,meta['spine_marker_channel']] > 0] = 255
+    green[aslice[:,:,meta['spine_marker_channel']] > 0] = 255
+    blue[aslice[:,:,meta['spine_marker_channel']] > 0] = 255
+    
     return cv2.merge([blue, green, red])
 
 if __name__ == "__main__":
@@ -593,23 +606,44 @@ if __name__ == "__main__":
 
     encoder = NIfTIEncoder()
 
-    result = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
     print('Dict Result:')
-    print(result['meta'])
-    print(len(result['hor_slices']), result['hor_slices'][0].shape)
-    print(len(result['sag_slices']), result['sag_slices'][0].shape)
-    print(len(result['cor_slices']), result['cor_slices'][0].shape)
+    print(ct['meta'])
+    print(len(ct['hor_slices']), ct['hor_slices'][0].shape)
+    print(len(ct['sag_slices']), ct['sag_slices'][0].shape)
+    print(len(ct['cor_slices']), ct['cor_slices'][0].shape)
     
     hor_imgs = []
-    for slice in result['hor_slices']:
-        hor_imgs.append(combine_image(slice, result['meta']))
-    imageio.mimsave('hor_slices.gif', hor_imgs, fps=10)
+    start_ct = False
+    for i,slice in enumerate(ct['hor_slices']):
+        hor_imgs.append(combine_image(slice, ct['meta']))
+        if slice[:,:,0].max() > -1 and not start_ct:
+            print('Start Index:', i)
+            start_ct = True
+        elif slice[:,:,0].max() == -1 and start_ct:
+            print('End Index:', i)
+            start_ct = False
+    imageio.mimsave('testdata/result/hor_slices.gif', hor_imgs, fps=10)
     sag_imgs = []
-    for slice in result['sag_slices']:
-        sag_imgs.append(combine_image(slice, result['meta']))
-    imageio.mimsave('sag_slices.gif', sag_imgs, fps=5)
+    for slice in ct['sag_slices']:
+        sag_imgs.append(combine_image(slice, ct['meta']))
+    imageio.mimsave('testdata/result/sag_slices.gif', sag_imgs, fps=5)
     cor_imgs = []
-    for slice in result['cor_slices']:
-        cor_imgs.append(combine_image(slice, result['meta']))
-    imageio.mimsave('cor_slices.gif', cor_imgs, fps=5)
+    for slice in ct['cor_slices']:
+        cor_imgs.append(combine_image(slice, ct['meta']))
+    imageio.mimsave('testdata/result/cor_slices.gif', cor_imgs, fps=5)
+    
+    ct_origin = ct['meta']['origin_in_ext']
+    ct_nifti_shape = ct['meta']['nifti_shape']
+    
+    idx_start = ct_origin[0] + ct_nifti_shape[0] - 3
+    print('origin:', ct_origin, 'nifti_shape:', ct_nifti_shape, 'start_index:', idx_start)
+    print('Index INFO:', idx_start,  len(ct['hor_slices']))
+    
+    frames, properties = encoder.to_frame('hor_slices', idx_start, slice_size=512, randomize_sentence=False, cat_prev_frame=False)
+    print('Frame Properties:', properties)
+    frame_imgs = []
+    for frame in frames:
+        frame_imgs.append(combine_image(frame, ct['meta']))
+    imageio.mimsave('testdata/result/hor_frame.gif', frame_imgs, fps=3)
      
