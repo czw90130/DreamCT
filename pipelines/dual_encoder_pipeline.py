@@ -433,17 +433,17 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         )
         
         # Get VAE embeddings
-        net_ctrl_states = []
-        for i in range(self.preframe_num):
-            vae_hs = self.vae.encode(prev_frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
-            net_ctrl_states.append(vae_hs)
+        # net_ctrl_states = []
+        # for i in range(self.preframe_num):
+        #     vae_hs = self.vae.encode(prev_frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
+        #     net_ctrl_states.append(vae_hs)
         if len(spine_marker.shape) == 3:
             # add channel dimension
             spine_marker = spine_marker.unsqueeze(1)
-        spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
-        vae_sp = self.vae.encode(spine_marker.cuda().float()).latent_dist.sample() * 0.18215
-        net_ctrl_states.append(vae_sp)
-        net_ctrl_states = torch.cat(net_ctrl_states, 1)
+        # spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
+        # vae_sp = self.vae.encode(spine_marker.cuda().float()).latent_dist.sample() * 0.18215
+        # net_ctrl_states.append(vae_sp)
+        # net_ctrl_states = torch.cat(net_ctrl_states, 1)
 
         # 4. Preprocess frames
         last_frame = torch.zeros_like(prev_frames[:,-1,:3])
@@ -457,6 +457,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         latents = self.prepare_latents(
             last_frame, latent_timestep, batch_size, num_images_per_prompt, embeddings.dtype, device, generator
         )
+        _, _, sm_h, sm_w = latents.shape
 
         # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -483,7 +484,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
                     latent_model_input = self.scheduler.scale_model_input(latents, t)
 
                     # Add spine_marker to noisy latents
-                    latent_model_input = torch.cat((latent_model_input.cuda(), net_ctrl_states.cuda()), 1)
+                    latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(spine_marker, (sm_h,sm_w)).cuda()), 1)
 
                     # predict the noise residual
                     noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample

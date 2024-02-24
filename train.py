@@ -112,7 +112,7 @@ def main(args):
     )
 
     noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
-    train_dataset = CTFramesDataset(ct_data_root=args.ct_data_dir, frame_num=args.preframe_num)
+    train_dataset = CTFramesDataset(ct_data_root=args.ct_data_dir, frame_num=2)#args.preframe_num)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -257,19 +257,20 @@ def main(args):
                 
                 # 编码控制项
                 # Get VAE embeddings
-                vae_hidden_states = []
-                for i in range(args.preframe_num):
-                    frame = batch[0][:,i,[0,3,3]].to(device=target_latents.device, dtype=weight_dtype)
-                    vae_hs = vae.encode(frame).latent_dist.sample() * 0.18215
-                    vae_hidden_states.append(vae_hs)
+                # vae_hidden_states = []
+                # for i in range(args.preframe_num):
+                #     frame = batch[0][:,i,[0,3,3]].to(device=target_latents.device, dtype=weight_dtype)
+                #     vae_hs = vae.encode(frame).latent_dist.sample() * 0.18215
+                #     vae_hidden_states.append(vae_hs)
                 spine_marker = target_frames[:,3].unsqueeze(1)
-                spine_marker = torch.cat([torch.zeros_like(spine_marker), spine_marker, spine_marker], 1)
-                vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
-                vae_hidden_states.append(vae_sp)
-                vae_hidden_states = torch.cat(vae_hidden_states, 1)
+                # spine_marker = torch.cat([torch.zeros_like(spine_marker), spine_marker, spine_marker], 1)
+                # vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
+                # vae_hidden_states.append(vae_sp)
+                # vae_hidden_states = torch.cat(vae_hidden_states, 1)
+                
                 # Concatenate vae hidden states with noise
-  
-                noisy_latents = torch.cat((noisy_latents, vae_hidden_states), 1)
+                _, _, h, w = noisy_latents.shape
+                noisy_latents = torch.cat((noisy_latents, F.interpolate(spine_marker, (h,w))), 1)
                 
                 # 编码文字
                 input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
