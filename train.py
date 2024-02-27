@@ -222,6 +222,7 @@ def main(args):
                 # batch[1]: properties
                 # 分离前置帧和目标帧
                 target_frames = batch[0][:,-1]
+                
                 target_texts = batch[1]['sentence']
                 
                 # Convert images to latent space
@@ -263,14 +264,14 @@ def main(args):
                 #     vae_hs = vae.encode(frame).latent_dist.sample() * 0.18215
                 #     vae_hidden_states.append(vae_hs)
                 spine_marker = target_frames[:,3].unsqueeze(1)
-                # spine_marker = torch.cat([torch.zeros_like(spine_marker), spine_marker, spine_marker], 1)
-                # vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
+                spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
+                vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
                 # vae_hidden_states.append(vae_sp)
                 # vae_hidden_states = torch.cat(vae_hidden_states, 1)
                 
                 # Concatenate vae hidden states with noise
                 _, _, h, w = noisy_latents.shape
-                noisy_latents = torch.cat((noisy_latents, F.interpolate(spine_marker, (h,w))), 1)
+                noisy_latents = torch.cat((noisy_latents, vae_sp), 1)
                 
                 # 编码文字
                 input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
