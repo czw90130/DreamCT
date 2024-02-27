@@ -72,21 +72,19 @@ if __name__ == "__main__":
     ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
     ct_origin = ct['meta']['origin_in_ext']
     ct_nifti_shape = ct['meta']['nifti_shape']
-    idx_start = ct_origin[0]
-    num = len(ct['hor_slices'])
-    
-    frames, properties = encoder.to_frame('hor_slices', idx_start,sample_num=num, slice_size=512, randomize_sentence=False, cat_prev_frame=False)
-    before_frame_imgs = [combine_image(frame, ct['meta']) for frame in frames]
-    
-    pred_frames = deepcopy(frames)
-    print(frames.shape)
+    num = 10
+
+    before_frame_imgs = []
+    after_frame_imgs = []
     # Iterate samples
     
-    pbar = tqdm(range(num-3))
+    pbar = tqdm(range(num))
     for i in pbar:
-        prev_frames = frames[i:i+3]
-        target_frame = frames[i+3]
+        frames, properties = encoder.to_frame('hor_slices', i,sample_num=2, slice_size=512, randomize_sentence=True, cat_prev_frame=False)
+        prev_frames = frames
+        target_frame = frames[-1]
         spine_marker = target_frame[-1]
+        before_frame_imgs.append(combine_image(target_frame, ct['meta']))
 
         with autocast():
             image = pipe(prompt=properties['sentence'],
@@ -101,14 +99,14 @@ if __name__ == "__main__":
                     )[0]
 
             # Save pose and image
-            frames[i+3,:3] = image
+            target_frame[:3] = image
+        after_frame_imgs.append(combine_image(target_frame, ct['meta']))
         if i % 10 == 0 and i > 0:
-            after_frame_imgs = [combine_image(frame, ct['meta']) for frame in frames]
+
             # Concatenate the images
             concatenated_images = [np.concatenate((before, after), axis=1) for before, after in zip(before_frame_imgs, after_frame_imgs)][:i]
             imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), concatenated_images, fps=2)
     
-    after_frame_imgs = [combine_image(frame, ct['meta']) for frame in frames]
     # Concatenate the images
     concatenated_images = [np.concatenate((before, after), axis=1) for before, after in zip(before_frame_imgs, after_frame_imgs)]
     imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), concatenated_images, fps=2)
