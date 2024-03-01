@@ -583,6 +583,138 @@ class NIfTIEncoder(SentenceBuilder):
         
         return frames, properties
     
+    def interpolate_slice(self, slice, mask, slice_size, crop, random_cat):
+        # 确保 slice_size 是整数
+        assert isinstance(slice_size, int), "slice_size must be an integer"
+        # 没有mask则创建一个全0的mask
+        if mask is None or mask.shape != slice.shape[1:]:
+            mask = torch.zeros_like(slice[0])
+        # 获取输入的形状
+        _, h, w = slice.shape
+        if crop:
+            # 以最短边为准，选择随机起点裁剪到正方形
+            if h < w:
+                start = random.randint(0, w - h)
+                slice = slice[:, :, start:start+h]
+                mask = mask[:, start:start+h]
+                # 在 mask 长边的随机一侧裁剪
+                # if random_cat:
+                cat_size = random.randint(1, h // 2)
+                if random.random() < 0.5:
+                    mask[:, :cat_size] = 1
+                else:
+                    mask[:, -cat_size:] = 1
+            else:
+                start = random.randint(0, h - w)
+                slice = slice[:, start:start+w, :]
+                mask = mask[start:start+w, :]
+                # 在 mask 长边的随机一侧裁剪
+                # if random_cat:
+                cat_size = random.randint(1, w // 2)
+                if random.random() < 0.5:
+                    mask[:cat_size, :] = 1
+                else:
+                    mask[-cat_size:, :] = 1
+            # 使用双线性插值进行缩放
+            slice = F.interpolate(slice.unsqueeze(0), size=(slice_size, slice_size), mode='bilinear', align_corners=False).squeeze(0)
+            mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(slice_size, slice_size), mode='nearest').squeeze(0).squeeze(0)
+        else:
+            # 计算缩放因子，以最长边为准
+            scale_factor = slice_size / max(h, w)
+            # 计算新的高度和宽度
+            new_h, new_w = int(h * scale_factor), int(w * scale_factor)
+            # 使用双线性插值进行缩放
+            slice = F.interpolate(slice.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
+            mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(new_h, new_w), mode='nearest').squeeze(0).squeeze(0)
+            # 如果短边小于 slice_size，将图像放在新的 slice_size * slice_size 的张量中间
+            if new_h < slice_size or new_w < slice_size:
+                # 创建新的张量
+                new_slice = torch.ones((1, slice_size, slice_size), device=slice.device) * -1
+                new_mask = torch.zeros((1, slice_size, slice_size), device=slice.device)
+                # 计算开始的索引
+                start_h = (slice_size - new_h) // 2
+                start_w = (slice_size - new_w) // 2
+                # 将缩放后的图像放在新的张量中间
+                new_slice[:, start_h:start_h+new_h, start_w:start_w+new_w] = slice
+                new_mask[:, start_h:start_h+new_h, start_w:start_w+new_w] = mask
+                # 更新 slice
+                slice = new_slice
+                mask = new_mask
+        # 如果 random_cat 为 True，随机在 mask 中裁剪一些方块并设置为 -1
+        if random_cat:
+            # 计算裁剪的方块数量
+            num_blocks = random.randint(0, 5)
+            for _ in range(num_blocks):
+                if random.random() < 0.5:
+                    # 随机选择一个方块
+                    block_h = random.randint(0, slice_size - 1)
+                    block_w = random.randint(0, slice_size - 1)
+                    # 随机选择一个起点
+                    end_h = random.randint(block_h, slice_size)
+                    end_w = random.randint(block_w, slice_size)
+                    mask[block_h:end_h, block_w:end_w] = 1
+                else:
+                # 随机选择一个边缘并裁剪一定的宽度
+                    block_h = random.randint(0, slice_size // 2)
+                    block_w = random.randint(0, slice_size // 2)
+                    edge = random.choice(['top', 'bottom', 'left', 'right'])
+                    if edge == 'top':
+                        mask[:block_h, :] = 1
+                    elif edge == 'bottom':
+                        mask[-block_h:, :] = 1
+                    elif edge == 'left':
+                        mask[:, :block_w] = 1
+                    elif edge == 'right':
+                        mask[:, -block_w:] = 1
+        return slice, mask
+
+
+    
+    def to_slice(self, plane, idx, ct=None, slice_size=None, randomize_sentence=True, random_cat=True):
+        if ct is None:
+            ct = self.result
+        
+        slices = ct[plane]
+        properties = {
+        'plane': plane[:-7], 
+        'positive_order': True, 
+        'spines': '',
+        'original_sizes': slices[0].shape[:2]
+        }
+        if 'age' in ct['meta']:
+            properties['age'] = ct['meta']['age']
+        if 'gender' in ct['meta']:
+            properties['gender'] = ct['meta']['gender']
+
+        # 假设slice是一个NumPy数组，形状为[高度, 宽度, 通道数]
+        slice = np.asarray(slices[idx])
+        slice = torch.from_numpy(slice).to(torch.float32)  # 转换为torch张量
+        slice = slice.permute(2, 0, 1)  # 重排维度为[C, H, W]
+        
+        # 如果plane 为 hor 则 mask 为十字形
+        if 'hor' in plane:
+            mask = torch.zeros_like(slice[0])
+            # 1
+            h_start = 0
+            h_end = ct['meta']['sag_start_idx']
+            w_start = 0
+            w_end = ct['meta']['cor_start_idx']
+            mask[h_start:h_end, w_start:w_end] = 1
+            # 2
+            w_start = ct['meta']['cor_start_idx'] + len(ct['cor_slices'])
+            mask[h_start:h_end, w_start:] = 1
+            # 4
+            h_start = ct['meta']['sag_start_idx'] + len(ct['sag_slices'])
+            mask[h_start:, w_start:] = 1
+            # 3
+            w_start = 0
+            mask[h_start:, w_start:w_end] = 1
+            return self.interpolate_slice(slice, mask, slice_size, crop=False, random_cat=random_cat)
+        else:
+            return self.interpolate_slice(slice, None, slice_size, crop=True, random_cat=random_cat)
+
+
+    
 def combine_image(slice, meta):
     # 硬拷贝
     aslice = deepcopy(slice)
@@ -606,49 +738,57 @@ if __name__ == "__main__":
     import sys
     import imageio
 
-    nifti_path = sys.argv[1]
-    obj_input_dir = sys.argv[2]
-
     encoder = NIfTIEncoder()
 
-    ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
-    print('Dict Result:')
-    print(ct['meta'])
-    print(len(ct['hor_slices']), ct['hor_slices'][0].shape)
-    print(len(ct['sag_slices']), ct['sag_slices'][0].shape)
-    print(len(ct['cor_slices']), ct['cor_slices'][0].shape)
+    # nifti_path = sys.argv[1]
+    # obj_input_dir = sys.argv[2]
+
+    # ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    # print('Dict Result:')
+    # print(ct['meta'])
+    # print(len(ct['hor_slices']), ct['hor_slices'][0].shape)
+    # print(len(ct['sag_slices']), ct['sag_slices'][0].shape)
+    # print(len(ct['cor_slices']), ct['cor_slices'][0].shape)
     
-    hor_imgs = []
-    start_ct = False
-    for i,slice in enumerate(ct['hor_slices']):
-        hor_imgs.append(combine_image(slice, ct['meta']))
-        if slice[:,:,0].max() > -1 and not start_ct:
-            print('Start Index:', i)
-            start_ct = True
-        elif slice[:,:,0].max() == -1 and start_ct:
-            print('End Index:', i)
-            start_ct = False
-    imageio.mimsave('testdata/result/hor_slices.gif', hor_imgs, fps=10)
-    sag_imgs = []
-    for slice in ct['sag_slices']:
-        sag_imgs.append(combine_image(slice, ct['meta']))
-    imageio.mimsave('testdata/result/sag_slices.gif', sag_imgs, fps=5)
-    cor_imgs = []
-    for slice in ct['cor_slices']:
-        cor_imgs.append(combine_image(slice, ct['meta']))
-    imageio.mimsave('testdata/result/cor_slices.gif', cor_imgs, fps=5)
+    # hor_imgs = []
+    # start_ct = False
+    # for i,slice in enumerate(ct['hor_slices']):
+    #     hor_imgs.append(combine_image(slice, ct['meta']))
+    #     if slice[:,:,0].max() > -1 and not start_ct:
+    #         print('Start Index:', i)
+    #         start_ct = True
+    #     elif slice[:,:,0].max() == -1 and start_ct:
+    #         print('End Index:', i)
+    #         start_ct = False
+    # imageio.mimsave('testdata/result/hor_slices.gif', hor_imgs, fps=10)
+    # sag_imgs = []
+    # for slice in ct['sag_slices']:
+    #     sag_imgs.append(combine_image(slice, ct['meta']))
+    # imageio.mimsave('testdata/result/sag_slices.gif', sag_imgs, fps=5)
+    # cor_imgs = []
+    # for slice in ct['cor_slices']:
+    #     cor_imgs.append(combine_image(slice, ct['meta']))
+    # imageio.mimsave('testdata/result/cor_slices.gif', cor_imgs, fps=5)
     
-    ct_origin = ct['meta']['origin_in_ext']
-    ct_nifti_shape = ct['meta']['nifti_shape']
+    # ct_origin = ct['meta']['origin_in_ext']
+    # ct_nifti_shape = ct['meta']['nifti_shape']
     
-    idx_start = ct_origin[0] + ct_nifti_shape[0] - 3
-    print('origin:', ct_origin, 'nifti_shape:', ct_nifti_shape, 'start_index:', idx_start)
-    print('Index INFO:', idx_start,  len(ct['hor_slices']))
+    # idx_start = ct_origin[0] + ct_nifti_shape[0] - 3
+    # print('origin:', ct_origin, 'nifti_shape:', ct_nifti_shape, 'start_index:', idx_start)
+    # print('Index INFO:', idx_start,  len(ct['hor_slices']))
     
-    frames, properties = encoder.to_frame('hor_slices', idx_start, slice_size=512, randomize_sentence=False, cat_prev_frame=False)
-    print('Frame Properties:', properties)
-    frame_imgs = []
-    for frame in frames:
-        frame_imgs.append(combine_image(frame, ct['meta']))
-    imageio.mimsave('testdata/result/hor_frame.gif', frame_imgs, fps=3)
+    # frames, properties = encoder.to_frame('hor_slices', idx_start, slice_size=512, randomize_sentence=False, cat_prev_frame=False)
+    # print('Frame Properties:', properties)
+    # frame_imgs = []
+    # for frame in frames:
+    #     frame_imgs.append(combine_image(frame, ct['meta']))
+    # imageio.mimsave('testdata/result/hor_frame.gif', frame_imgs, fps=3)
+
+    encoder.load_npz('testdata/s0011.npz')
+    slice, mask = encoder.to_slice('sag_slices', 0, slice_size=512, randomize_sentence=True, random_cat=True)
+    print(slice.shape, mask.shape)
+    slice_img = combine_image(slice, encoder.result['meta'])
+    mask_img = mask * 255
+    imageio.imwrite('testdata/result/slice.png', slice_img)
+    imageio.imwrite('testdata/result/mask.png', mask_img)
      

@@ -19,8 +19,36 @@ from diffusers import AutoencoderKL
 from diffusers.models import UNet2DConditionModel
 from transformers import CLIPTokenizer, CLIPTextModel
 
+def get_unet(pretrained_model_name_or_path, revision=None):
+    print("Loading UNet")
+    # 判断是否是自建模型
+    load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet", "unet.pth"))
+    if load_pth:
+        # 加载json文件
+        with open(os.path.join(pretrained_model_name_or_path, "unet", "config.json"), "r") as f:
+            config = json.load(f)
+        # 初始化模型结构
+        unet = UNet2DConditionModel.from_config(config)
+        # 加载预训练模型
+        unet_chkpt = os.path.join(pretrained_model_name_or_path, "unet", "unet.pth")
+        unet_state_dict = torch.load(unet_chkpt, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in unet_state_dict.items():
+            name = k if k in unet.state_dict() else k[7:]
+            new_state_dict[name] = v
+        unet.load_state_dict(new_state_dict)
+    else:
+        # Load pretrained UNet layers
+        unet = UNet2DConditionModel.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="unet",
+            revision=revision
+        )
+
+    return unet
+
 # 增加的通道为t-2,t-1,t 和 spine
-def get_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
+def get_add_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
     print("Loading UNet")
     # 判断是否是自建模型
     load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet", "unet.pth"))
