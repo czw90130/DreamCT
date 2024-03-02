@@ -92,10 +92,10 @@ class CTFramesDataset(Dataset, NIfTIEncoder):
         return len(self.data_idx_buffer)
     
     def __getitem__(self, idx):
-        ct_npz, plane, start_idx = self.data_idx_buffer[idx]
+        ct_npz, plane, idx = self.data_idx_buffer[idx]
         ct = self.load_data(ct_npz)
         
-        return self.to_frame(plane, start_idx, ct=ct, slice_size=self.slice_size, sample_num=self.frame_num, positive_order=random.choice([True, False]))
+        return self.to_slice(plane, idx, ct=ct, slice_size=self.slice_size)
     
 if __name__ == "__main__":
     from torch.utils.data import DataLoader

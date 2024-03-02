@@ -629,14 +629,14 @@ class NIfTIEncoder(SentenceBuilder):
             # 如果短边小于 slice_size，将图像放在新的 slice_size * slice_size 的张量中间
             if new_h < slice_size or new_w < slice_size:
                 # 创建新的张量
-                new_slice = torch.ones((1, slice_size, slice_size), device=slice.device) * -1
-                new_mask = torch.zeros((1, slice_size, slice_size), device=slice.device)
+                new_slice = torch.ones((slice.shape[0], slice_size, slice_size), device=slice.device) * -1
+                new_mask = torch.zeros((slice_size, slice_size), device=slice.device)
                 # 计算开始的索引
                 start_h = (slice_size - new_h) // 2
                 start_w = (slice_size - new_w) // 2
                 # 将缩放后的图像放在新的张量中间
                 new_slice[:, start_h:start_h+new_h, start_w:start_w+new_w] = slice
-                new_mask[:, start_h:start_h+new_h, start_w:start_w+new_w] = mask
+                new_mask[start_h:start_h+new_h, start_w:start_w+new_w] = mask
                 # 更新 slice
                 slice = new_slice
                 mask = new_mask
@@ -675,6 +675,7 @@ class NIfTIEncoder(SentenceBuilder):
             ct = self.result
         
         slices = ct[plane]
+        sm_ch = ct['meta']['spine_marker_channel']
         properties = {
         'plane': plane[:-7], 
         'positive_order': True, 
@@ -709,9 +710,23 @@ class NIfTIEncoder(SentenceBuilder):
             # 3
             w_start = 0
             mask[h_start:, w_start:w_end] = 1
-            return self.interpolate_slice(slice, mask, slice_size, crop=False, random_cat=random_cat)
+            slice, mask = self.interpolate_slice(slice, mask, slice_size, crop=False, random_cat=random_cat)
         else:
-            return self.interpolate_slice(slice, None, slice_size, crop=True, random_cat=random_cat)
+            slice, mask = self.interpolate_slice(slice, None, slice_size, crop=True, random_cat=random_cat)
+
+        # 获取存在的脊柱tag
+        obj_tags = []
+        for obj_tag, index_value in ct['meta']['spine_marker'].items():
+            if index_value in slice[sm_ch]:
+                obj_tags.append(obj_tag)
+                properties['spines'] = '|'.join(obj_tags)
+        # sm_ch 归一化
+        slice[sm_ch] = slice[sm_ch] / 12.5 - 1
+        properties['sentence'] = self.dict_to_sentence(properties, randomize=randomize_sentence)
+        
+        # print('slice:',slice.shape, 'mask:', mask.shape, 'plane:',properties['plane'])
+        
+        return slice, mask, properties
 
 
     

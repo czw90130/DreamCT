@@ -221,26 +221,25 @@ def main(args):
                 # batch[0]: frame data
                 # batch[1]: properties
                 # 分离前置帧和目标帧
-                target_frames = batch[0][:,-1]
+                slice = batch[0]
+                mask = batch[1].unsqueeze(1)
+                properties = batch[2]
+
+                target_img = slice[:,:3]
+                # 应用遮罩生成被遮挡的图像版本
+                masked_img = target_img * (mask < 0.5)  # 反向掩码
+                # 添加标记
+                masked_img[:,1] = slice[:,3]
+                masked_img[:,2] = slice[:,3]
                 
-                target_texts = batch[1]['sentence']
+                target_texts = properties['sentence']
                 
                 # Convert images to latent space
-                target_latents = vae.encode(target_frames[:, :3].to(dtype=weight_dtype)).latent_dist.sample()
+                target_latents = vae.encode(target_img.to(dtype=weight_dtype)).latent_dist.sample()
                 target_latents = target_latents * 0.18215
 
-                # pred_latents = 1 / 0.18215 * target_latents
-                # pred_frames = vae.decode(pred_latents).sample
-                # pred_frames = pred_frames.clamp(-1, 1)
-
-                # vae_loss = F.mse_loss(pred_frames.float(), target_frames[:, :3].clamp(-1, 1).float(), reduction="mean")
-
-                # for i in range(batch[0].shape[1]-1):
-                #     w = (batch[0].shape[1]-i-1) * 0.01
-                #     gap_latents = vae.encode(batch[0][:,i][:, :3].to(dtype=weight_dtype)).latent_dist.sample()
-                #     gap_pred_frames = vae.decode(pred_latents).sample
-                #     gap_pred_frames = gap_pred_frames.clamp(-1, 1)
-                #     vae_loss = vae_loss + w / F.mse_loss(gap_pred_frames.float(), batch[0][:,i][:, :3].clamp(-1, 1).float(), reduction="mean")
+                masked_latents = vae.encode(masked_img.to(dtype=weight_dtype)).latent_dist.sample()
+                masked_latents = masked_latents * 0.18215
                 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(target_latents)
@@ -255,23 +254,10 @@ def main(args):
                 # print("target_latents shape = ", target_latents.shape)
                 noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
                 # print("noisy_latents shape = ", noisy_latents.shape)
-                
-                # 编码控制项
-                # Get VAE embeddings
-                # vae_hidden_states = []
-                # for i in range(args.preframe_num):
-                #     frame = batch[0][:,i,[0,3,3]].to(device=target_latents.device, dtype=weight_dtype)
-                #     vae_hs = vae.encode(frame).latent_dist.sample() * 0.18215
-                #     vae_hidden_states.append(vae_hs)
-                spine_marker = target_frames[:,3].unsqueeze(1)
-                spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
-                vae_sp = vae.encode(spine_marker.to(device=target_latents.device, dtype=weight_dtype)).latent_dist.sample() * 0.18215
-                # vae_hidden_states.append(vae_sp)
-                # vae_hidden_states = torch.cat(vae_hidden_states, 1)
-                
-                # Concatenate vae hidden states with noise
+
                 _, _, h, w = noisy_latents.shape
-                noisy_latents = torch.cat((noisy_latents, vae_sp), 1)
+                mask = F.interpolate(mask, size=(h,w)).to(dtype=weight_dtype)
+                noisy_latents = torch.cat((noisy_latents, mask, masked_latents), 1)
                 
                 # 编码文字
                 input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
@@ -341,16 +327,13 @@ def main(args):
                     tgt_images = latents2img(tgt_latents)
                     
                     noise_viz = latents2img(noisy_latents[:,:4,:,:])
-                    # decode_vis = inputs2img(pred_frames)
                     
-                    target = inputs2img(target_frames[:,:3])
-                    input_img = inputs2img(batch[0][:,-2,:3])
+                    target = inputs2img(target_img)
                     
-                    writer.add_image(f'train/0input_last', input_img[0], global_step=global_step)
-                    writer.add_image(f'train/1noise_viz', noise_viz[0], global_step=global_step)
-                    writer.add_image(f'train/2pred_img', pred_images[0], global_step=global_step)
-                    writer.add_image(f'train/3tgt_img', tgt_images[0], global_step=global_step)
-                    writer.add_image(f'train/4target', target[0], global_step=global_step)
+                    writer.add_image(f'train/0noise_viz', noise_viz[0], global_step=global_step)
+                    writer.add_image(f'train/1pred_img', pred_images[0], global_step=global_step)
+                    writer.add_image(f'train/2tgt_img', tgt_images[0], global_step=global_step)
+                    writer.add_image(f'train/3target', target[0], global_step=global_step)
                     # writer.add_image(f'train/5decode_vis', decode_vis[0], global_step=global_step)
 
             # logs = {"loss": loss.detach().item(),"vae_loss":vae_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
