@@ -1,0 +1,25 @@
+{
+  "_class_name": "StableDiffusionCT2CTPipeline",
+  "_diffusers_version": "0.20.0",
+  "_name_or_path": ".\\model_stabilityai-stable-diffusion-2-inpainting\\",
+  "scheduler": [
+    "diffusers",
+    "PNDMScheduler"
+  ],
+  "text_encoder": [
+    "transformers",
+    "CLIPTextModel"
+  ],
+  "tokenizer": [
+    "transformers",
+    "CLIPTokenizer"
+  ],
+  "unet": [
+    "diffusers",
+    "UNet2DConditionModel"
+  ],
+  "vae": [
+    "diffusers",
+    "AutoencoderKL"
+  ]
+}
