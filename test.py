@@ -70,43 +70,70 @@ if __name__ == "__main__":
 
     encoder = NIfTIEncoder()
     ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
-    ct_origin = ct['meta']['origin_in_ext']
-    ct_nifti_shape = ct['meta']['nifti_shape']
-    num = 10
-
-    before_frame_imgs = []
-    after_frame_imgs = []
-    # Iterate samples
+    # ct_origin = ct['meta']['origin_in_ext']
+    # ct_nifti_shape = ct['meta']['nifti_shape']
+    # num = 10
     
-    pbar = tqdm(range(num))
-    for i in pbar:
-        frames, properties = encoder.to_frame('hor_slices', i,sample_num=2, slice_size=512, randomize_sentence=True, cat_prev_frame=False)
-        prev_frames = frames
-        target_frame = frames[-1]
-        spine_marker = target_frame[-1]
-        before_frame_imgs.append(combine_image(target_frame, ct['meta']))
+    slice, mask, properties = encoder.to_slice('sag_slices', 10, slice_size=512, randomize_sentence=False, random_cat=False)
+    mask = mask.unsqueeze(0)
+    # 应用遮罩生成被遮挡的图像版本
+    masked_img = slice[:,:3] * (mask < 0.5)  # 反向掩码
+    # 添加标记
+    masked_img[:,1] = slice[:,3]
+    masked_img[:,2] = slice[:,3]
 
-        with autocast():
-            image = pipe(prompt=properties['sentence'],
-                        prev_frames=prev_frames,
-                        spine_marker=spine_marker,
-                        strength=1.0,
-                        num_inference_steps=args.n_steps,
-                        guidance_scale=7.5,
-                        s1=args.s1,
-                        s2=args.s2,
-                        callback_steps=1,
-                    )[0]
 
-            # Save pose and image
-            target_frame[:3] = image
-        after_frame_imgs.append(combine_image(target_frame, ct['meta']))
-        if i % 10 == 0 and i > 0:
-
-            # Concatenate the images
-            concatenated_images = [np.concatenate((before, after), axis=1) for before, after in zip(before_frame_imgs, after_frame_imgs)][:i]
-            imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), concatenated_images, fps=2)
     
-    # Concatenate the images
-    concatenated_images = [np.concatenate((before, after), axis=1) for before, after in zip(before_frame_imgs, after_frame_imgs)]
-    imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), concatenated_images, fps=2)
+    with autocast():
+        image = pipe(prompt=properties['sentence'],
+                    masked_img=masked_img,
+                    mask=mask,
+                    strength=1.0,
+                    num_inference_steps=args.n_steps,
+                    guidance_scale=7.5,
+                    s1=args.s1,
+                    s2=args.s2,
+                    callback_steps=1,
+                )
+
+    before_img = masked_img[0].permute(1,2,0).cpu().numpy()
+    after_img = image[0].permute(1,2,0).cpu().numpy()
+    combine_image = np.concatenate((before_img, after_img), axis=1)
+    # save image
+    imageio.imsave(os.path.join(save_folder, 'combine_image.png'), combine_image)
+    # before_frame_imgs = []
+    # after_frame_imgs = []
+    # # Iterate samples
+    
+    # pbar = tqdm(range(num))
+    # for i in pbar:
+    #     frames, properties = encoder.to_frame('hor_slices', i,sample_num=2, slice_size=512, randomize_sentence=True, cat_prev_frame=False)
+    #     prev_frames = frames
+    #     target_frame = frames[-1]
+    #     spine_marker = target_frame[-1]
+    #     before_frame_imgs.append(combine_image(target_frame, ct['meta']))
+
+    #     with autocast():
+    #         image = pipe(prompt=properties['sentence'],
+    #                     prev_frames=prev_frames,
+    #                     spine_marker=spine_marker,
+    #                     strength=1.0,
+    #                     num_inference_steps=args.n_steps,
+    #                     guidance_scale=7.5,
+    #                     s1=args.s1,
+    #                     s2=args.s2,
+    #                     callback_steps=1,
+    #                 )[0]
+
+    #         # Save pose and image
+    #         target_frame[:3] = image
+    #     after_frame_imgs.append(combine_image(target_frame, ct['meta']))
+    #     if i % 10 == 0 and i > 0:
+
+    #         # Concatenate the images
+    #         concatenated_images = [np.concatenate((before, after), axis=1) for before, after in zip(before_frame_imgs, after_frame_imgs)][:i]
+    #         imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), concatenated_images, fps=2)
+    
+    # # Concatenate the images
+    # concatenated_images = [np.concatenate((before, after), axis=1) for before, after in zip(before_frame_imgs, after_frame_imgs)]
+    # imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), concatenated_images, fps=2)

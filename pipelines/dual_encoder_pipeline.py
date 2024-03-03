@@ -189,7 +189,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         return self.device
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
-    def _encode_frames(self, prompt, frames, num_images_per_prompt, do_classifier_free_guidance, negative_prompt):
+    def _encode_frames(self, prompt):
         r"""
         Encodes the prompt into text encoder hidden states.
         将提示编码为文本编码器的隐藏状态。
@@ -283,6 +283,9 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             init_latents = init_latent_dist.sample(generator=generator)
             init_latents = 0.18215 * init_latents
             # print("Init Latents Shape = ", init_latents.shape)
+            masked_latent_disk = self.vae.encode(image).latent_dist
+            masked_latents = masked_latent_disk.sample(generator=generator)
+            masked_latents = 0.18215 * masked_latents
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
@@ -295,12 +298,14 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             deprecate("len(prompt) != len(image)", "1.0.0", deprecation_message, standard_warn=False)
             additional_image_per_prompt = batch_size // init_latents.shape[0]
             init_latents = torch.cat([init_latents] * additional_image_per_prompt * num_images_per_prompt, dim=0)
+            masked_latents = torch.cat([masked_latents] * additional_image_per_prompt * num_images_per_prompt, dim=0)
         elif batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] != 0:
             raise ValueError(
                 f"Cannot duplicate `image` of batch size {init_latents.shape[0]} to {batch_size} text prompts."
             )
         else:
             init_latents = torch.cat([init_latents] * num_images_per_prompt, dim=0)
+            masked_latents = torch.cat([masked_latents] * num_images_per_prompt, dim=0)
 
         # add noise to latents using the timesteps
         if self.fixed_noise is None:
@@ -311,16 +316,15 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
 
         # get latents
         init_latents = self.scheduler.add_noise(init_latents.cuda(), noise.cuda(), timestep)
-        latents = init_latents
 
-        return latents
+        return init_latents, masked_latents
 
     @torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]],
-        prev_frames: torch.FloatTensor = None,
-        spine_marker: torch.FloatTensor = None,
+        masked_img: torch.FloatTensor = None,
+        mask: torch.FloatTensor = None,
         strength: float = 1.0,
         num_inference_steps: Optional[int] = 100,
         guidance_scale: Optional[float] = 1,
@@ -415,8 +419,8 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         # 2. Define call parameters
         if isinstance(prompt, str):
             batch_size = 1
-            prev_frames = prev_frames.unsqueeze(0)
-            spine_marker = spine_marker.unsqueeze(0)
+            masked_img = masked_img.unsqueeze(0)
+            mask = mask.unsqueeze(0)
         else:
             batch_size = len(prompt)
         
@@ -424,13 +428,10 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
-        # do_classifier_free_guidance = guidance_scale > 1.0 or s1 > 0.0 or s2 > 0.0
-        do_classifier_free_guidance = False
+
 
         # 3. Encode input image: [unconditional, condional, conditional]
-        embeddings = self._encode_frames(
-            prompt, prev_frames, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
-        )
+        embeddings = self._encode_frames(prompt)
         
         # Get VAE embeddings
         # net_ctrl_states = []
@@ -446,7 +447,8 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         # net_ctrl_states = torch.cat(net_ctrl_states, 1)
 
         # 4. Preprocess frames
-        last_frame = torch.zeros_like(prev_frames[:,-1,:3])
+        # init_img = torch.zeros_like(masked_img)
+        init_img = masked_img.clone()
 
         # 6. Set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -454,10 +456,10 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 
         # 7. Prepare latent variables
-        latents = self.prepare_latents(
-            last_frame, latent_timestep, batch_size, num_images_per_prompt, embeddings.dtype, device, generator
+        latents, masked_latents = self.prepare_latents(
+            init_img, masked_img, latent_timestep, batch_size, num_images_per_prompt, embeddings.dtype, device, generator
         )
-        _, _, sm_h, sm_w = latents.shape
+        _, _, h, w = latents.shape
 
         # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -484,7 +486,7 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
                     latent_model_input = self.scheduler.scale_model_input(latents, t)
 
                     # Add spine_marker to noisy latents
-                    latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(spine_marker, (sm_h,sm_w)).cuda()), 1)
+                    latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(mask, (h,w)).cuda(), masked_latents.cuda()), 1)
 
                     # predict the noise residual
                     noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample
