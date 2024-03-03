@@ -272,18 +272,19 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
 
         return timesteps, num_inference_steps - t_start
 
-    def prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None):
+    def prepare_latents(self, image, masked_img, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None):
         """
         Prepare latents for the diffusion process.
         """
         with autocast():
             image = image.to(device=device, dtype=dtype).cuda()
+            masked_img = masked_img.to(device=device, dtype=dtype).cuda()
             # print("Image Shape = ", image.shape)
             init_latent_dist = self.vae.encode(image).latent_dist
             init_latents = init_latent_dist.sample(generator=generator)
             init_latents = 0.18215 * init_latents
             # print("Init Latents Shape = ", init_latents.shape)
-            masked_latent_disk = self.vae.encode(image).latent_dist
+            masked_latent_disk = self.vae.encode(masked_img).latent_dist
             masked_latents = masked_latent_disk.sample(generator=generator)
             masked_latents = 0.18215 * masked_latents
 
@@ -432,19 +433,6 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
 
         # 3. Encode input image: [unconditional, condional, conditional]
         embeddings = self._encode_frames(prompt)
-        
-        # Get VAE embeddings
-        # net_ctrl_states = []
-        # for i in range(self.preframe_num):
-        #     vae_hs = self.vae.encode(prev_frames[:,i,:3].cuda().float()).latent_dist.sample() * 0.18215
-        #     net_ctrl_states.append(vae_hs)
-        if len(spine_marker.shape) == 3:
-            # add channel dimension
-            spine_marker = spine_marker.unsqueeze(1)
-        # spine_marker = torch.cat([spine_marker, spine_marker, spine_marker], 1)
-        # vae_sp = self.vae.encode(spine_marker.cuda().float()).latent_dist.sample() * 0.18215
-        # net_ctrl_states.append(vae_sp)
-        # net_ctrl_states = torch.cat(net_ctrl_states, 1)
 
         # 4. Preprocess frames
         # init_img = torch.zeros_like(masked_img)

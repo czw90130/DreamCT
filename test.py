@@ -66,10 +66,11 @@ if __name__ == "__main__":
     from copy import deepcopy
     # Load ct data
     nifti_path = args.ct_path
-    obj_input_dir = args.obj_dir
+    # obj_input_dir = args.obj_dir
 
     encoder = NIfTIEncoder()
-    ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    # ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    encoder.load_npz(nifti_path)
     # ct_origin = ct['meta']['origin_in_ext']
     # ct_nifti_shape = ct['meta']['nifti_shape']
     # num = 10
@@ -77,10 +78,10 @@ if __name__ == "__main__":
     slice, mask, properties = encoder.to_slice('sag_slices', 10, slice_size=512, randomize_sentence=False, random_cat=False)
     mask = mask.unsqueeze(0)
     # 应用遮罩生成被遮挡的图像版本
-    masked_img = slice[:,:3] * (mask < 0.5)  # 反向掩码
+    masked_img = slice[:3] * (mask < 0.5)  # 反向掩码
     # 添加标记
-    masked_img[:,1] = slice[:,3]
-    masked_img[:,2] = slice[:,3]
+    masked_img[1] = slice[3]
+    masked_img[2] = slice[3]
 
 
     
