@@ -583,7 +583,7 @@ class NIfTIEncoder(SentenceBuilder):
         
         return frames, properties
     
-    def interpolate_slice(self, slice, mask, slice_size, crop, random_cat):
+    def interpolate_slice(self, slice, mask, slice_size, crop, mask_edge, random_cat):
         # 确保 slice_size 是整数
         assert isinstance(slice_size, int), "slice_size must be an integer"
         # 没有mask则创建一个全0的mask
@@ -591,30 +591,51 @@ class NIfTIEncoder(SentenceBuilder):
             mask = torch.zeros_like(slice[0])
         # 获取输入的形状
         _, h, w = slice.shape
-        if crop:
+        if crop or isinstance(crop, int):
             # 以最短边为准，选择随机起点裁剪到正方形
             if h < w:
-                start = random.randint(0, w - h)
+                if not isinstance(crop, int):
+                    start = random.randint(0, w - h)
+                else:
+                    start = crop
+                    if start + h > w:
+                        start = w - h
                 slice = slice[:, :, start:start+h]
                 mask = mask[:, start:start+h]
                 # 在 mask 长边的随机一侧裁剪
-                # if random_cat:
-                cat_size = random.randint(1, h // 2)
-                if random.random() < 0.5:
-                    mask[:, :cat_size] = 1
-                else:
-                    mask[:, -cat_size:] = 1
+                if mask_edge is None:
+                    cat_size = random.randint(1, h // 2)
+                    if random.random() < 0.5:
+                        mask[:, :cat_size] = 1
+                    else:
+                        mask[:, -cat_size:] = 1
+                # 指定 mask 范围
+                elif mask_edge > 0:
+                    mask[:, :mask_edge] = 1
+                elif mask_edge < 0:
+                    mask[:, mask_edge:] = 1 
             else:
-                start = random.randint(0, h - w)
+                if not isinstance(crop, int):
+                    start = random.randint(0, h - w)
+                else:
+                    start = crop
+                    if start + w > h:
+                        start = h - w
                 slice = slice[:, start:start+w, :]
                 mask = mask[start:start+w, :]
                 # 在 mask 长边的随机一侧裁剪
-                # if random_cat:
-                cat_size = random.randint(1, w // 2)
-                if random.random() < 0.5:
-                    mask[:cat_size, :] = 1
-                else:
-                    mask[-cat_size:, :] = 1
+                if mask_edge is None:
+                    cat_size = random.randint(1, w // 2)
+                    if random.random() < 0.5:
+                        mask[:cat_size, :] = 1
+                    else:
+                        mask[-cat_size:, :] = 1
+                # 指定 mask 范围
+                elif mask_edge > 0:
+                    mask[:mask_edge, :] = 1
+                elif mask_edge < 0:
+                    mask[mask_edge:, :] = 1
+
             # 使用双线性插值进行缩放
             slice = F.interpolate(slice.unsqueeze(0), size=(slice_size, slice_size), mode='bilinear', align_corners=False).squeeze(0)
             mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(slice_size, slice_size), mode='nearest').squeeze(0).squeeze(0)
@@ -668,9 +689,7 @@ class NIfTIEncoder(SentenceBuilder):
                         mask[:, -block_w:] = 1
         return slice, mask
 
-
-    
-    def to_slice(self, plane, idx, ct=None, slice_size=None, randomize_sentence=True, random_cat=True):
+    def to_slice(self, plane, idx, ct=None, slice_size=None, crop=True, mask_edge=None, mask_ext=True, randomize_sentence=True, random_cat=True):
         if ct is None:
             ct = self.result
         
@@ -692,9 +711,10 @@ class NIfTIEncoder(SentenceBuilder):
         slice = torch.from_numpy(slice).to(torch.float32)  # 转换为torch张量
         slice = slice.permute(2, 0, 1)  # 重排维度为[C, H, W]
         
+        mask = torch.zeros_like(slice[0])
+        
         # 如果plane 为 hor 则 mask 为十字形
         if 'hor' in plane:
-            mask = torch.zeros_like(slice[0])
             # 1
             h_start = 0
             h_end = ct['meta']['sag_start_idx']
@@ -710,9 +730,19 @@ class NIfTIEncoder(SentenceBuilder):
             # 3
             w_start = 0
             mask[h_start:, w_start:w_end] = 1
-            slice, mask = self.interpolate_slice(slice, mask, slice_size, crop=False, random_cat=random_cat)
+
+            slice, mask = self.interpolate_slice(slice, mask, slice_size, crop=False, mask_edge=mask_edge, random_cat=random_cat)
         else:
-            slice, mask = self.interpolate_slice(slice, None, slice_size, crop=True, random_cat=random_cat)
+            if mask_ext and 'origin_in_ext' in ct['meta']:
+                bottom = -ct['meta']['origin_in_ext'][0]-1
+                top = mask.shape[0]-ct['meta']['origin_in_ext'][0]-ct['meta']['nifti_shape'][0]
+                mask[bottom:] = 1
+                mask[:top] = 1
+                if mask_edge > 0:
+                    mask_edge = top + mask_edge
+                elif mask_edge < 0:
+                    mask_edge = bottom + mask_edge
+            slice, mask = self.interpolate_slice(slice, mask, slice_size, crop=crop, mask_edge=mask_edge, random_cat=random_cat)
 
         # 获取存在的脊柱tag
         obj_tags = []
@@ -728,6 +758,7 @@ class NIfTIEncoder(SentenceBuilder):
         
         return slice, mask, properties
 
+        
 
     
 def combine_image(slice, meta):
@@ -755,15 +786,15 @@ if __name__ == "__main__":
 
     encoder = NIfTIEncoder()
 
-    # nifti_path = sys.argv[1]
-    # obj_input_dir = sys.argv[2]
+    nifti_path = sys.argv[1]
+    obj_input_dir = sys.argv[2]
 
-    # ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
-    # print('Dict Result:')
-    # print(ct['meta'])
-    # print(len(ct['hor_slices']), ct['hor_slices'][0].shape)
-    # print(len(ct['sag_slices']), ct['sag_slices'][0].shape)
-    # print(len(ct['cor_slices']), ct['cor_slices'][0].shape)
+    ct = encoder(nifti_path, obj_input_dir, needs_extension=True)
+    print('Dict Result:')
+    print(ct['meta'])
+    print(len(ct['hor_slices']), ct['hor_slices'][0].shape)
+    print(len(ct['sag_slices']), ct['sag_slices'][0].shape)
+    print(len(ct['cor_slices']), ct['cor_slices'][0].shape)
     
     # hor_imgs = []
     # start_ct = False
@@ -785,12 +816,8 @@ if __name__ == "__main__":
     #     cor_imgs.append(combine_image(slice, ct['meta']))
     # imageio.mimsave('testdata/result/cor_slices.gif', cor_imgs, fps=5)
     
-    # ct_origin = ct['meta']['origin_in_ext']
-    # ct_nifti_shape = ct['meta']['nifti_shape']
-    
-    # idx_start = ct_origin[0] + ct_nifti_shape[0] - 3
-    # print('origin:', ct_origin, 'nifti_shape:', ct_nifti_shape, 'start_index:', idx_start)
-    # print('Index INFO:', idx_start,  len(ct['hor_slices']))
+
+    slice, mask, properties = encoder.to_slice('sag_slices', 50, slice_size=512, crop=0, mask_edge=20, randomize_sentence=False, random_cat=False)
     
     # frames, properties = encoder.to_frame('hor_slices', idx_start, slice_size=512, randomize_sentence=False, cat_prev_frame=False)
     # print('Frame Properties:', properties)
@@ -799,10 +826,14 @@ if __name__ == "__main__":
     #     frame_imgs.append(combine_image(frame, ct['meta']))
     # imageio.mimsave('testdata/result/hor_frame.gif', frame_imgs, fps=3)
 
-    encoder.load_npz('testdata/s0011.npz')
-    slice, mask = encoder.to_slice('sag_slices', 0, slice_size=512, randomize_sentence=True, random_cat=True)
+    # encoder.load_npz('testdata/s0011.npz')
+    # slice, mask = encoder.to_slice('sag_slices', 0, slice_size=512, randomize_sentence=True, random_cat=True)
     print(slice.shape, mask.shape)
-    slice_img = combine_image(slice, encoder.result['meta'])
+    slice_img = slice[:3] * (mask.unsqueeze(0) < 0.5)  # 反向掩码
+    slice_img[1][slice[3]>-1] = slice[3][slice[3]>-1]
+    slice_img[2][slice[3]>-1] = slice[3][slice[3]>-1]
+    slice_img = slice_img.permute(1,2,0).cpu().numpy()
+
     mask_img = mask * 255
     imageio.imwrite('testdata/result/slice.png', slice_img)
     imageio.imwrite('testdata/result/mask.png', mask_img)

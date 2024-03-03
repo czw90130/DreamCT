@@ -229,8 +229,8 @@ def main(args):
                 # 应用遮罩生成被遮挡的图像版本
                 masked_img = target_img * (mask < 0.5)  # 反向掩码
                 # 添加标记
-                masked_img[:,1][slice[:,3]>-1] = slice[:,3][slice[:,3]>-1]
-                masked_img[:,2][slice[:,3]>-1] = slice[:,3][slice[:,3]>-1]
+                masked_img[:,1] = slice[:,3]
+                masked_img[:,2] = slice[:,3]
                 
                 target_texts = properties['sentence']
                 
