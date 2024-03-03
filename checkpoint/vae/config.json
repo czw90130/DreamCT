@@ -1,7 +1,7 @@
 {
   "_class_name": "AutoencoderKL",
-  "_diffusers_version": "0.26.3",
-  "_name_or_path": "/root/autodl-tmp/checkpoint-0/",
+  "_diffusers_version": "0.20.0",
+  "_name_or_path": ".\\model_stabilityai-stable-diffusion-2-inpainting\\",
   "act_fn": "silu",
   "block_out_channels": [
     128,
