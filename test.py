@@ -97,7 +97,7 @@ if __name__ == "__main__":
                     callback_steps=1,
                 )
 
-    before_img = masked_img[0].permute(1,2,0).cpu().numpy()
+    before_img = masked_img.permute(1,2,0).cpu().numpy()
     after_img = image[0].permute(1,2,0).cpu().numpy()
     combine_image = np.concatenate((before_img, after_img), axis=1)
     # save image
