@@ -1,5 +1,5 @@
 {
-  "_name_or_path": "/root/autodl-tmp/checkpoint-0/",
+  "_name_or_path": ".\\model_stabilityai-stable-diffusion-2-inpainting\\",
   "architectures": [
     "CLIPTextModel"
   ],
@@ -20,6 +20,6 @@
   "pad_token_id": 1,
   "projection_dim": 512,
   "torch_dtype": "float32",
-  "transformers_version": "4.37.2",
+  "transformers_version": "4.31.0",
   "vocab_size": 49408
 }
