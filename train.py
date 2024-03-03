@@ -226,13 +226,26 @@ def main(args):
                 properties = batch[2]
 
                 target_img = slice[:,:3]
-                # 应用遮罩生成被遮挡的图像版本
-                masked_img = target_img * (mask < 0.5)  # 反向掩码
-                # 添加标记
-                masked_img[:,1] = slice[:,3]
-                masked_img[:,2] = slice[:,3]
                 
-                target_texts = properties['sentence']
+                # 应用遮罩生成被遮挡的图像版本
+                p = random.random()
+                if p <= args.dropout_rate:
+                    masked_img = torch.zeros_like(target_img)
+                else:
+                    masked_img = target_img * (mask < 0.5)  # 反向掩码
+                # 添加标记
+                p = random.random()
+                if p <= args.dropout_rate:
+                    masked_img[:,1] = -1
+                    masked_img[:,2] = -1
+                else:
+                    masked_img[:,1] = slice[:,3]
+                    masked_img[:,2] = slice[:,3]
+                p = random.random()
+                if p <= args.dropout_rate:
+                    target_texts = ""
+                else:
+                    target_texts = properties['sentence']
                 
                 # Convert images to latent space
                 target_latents = vae.encode(target_img.to(dtype=weight_dtype)).latent_dist.sample()
