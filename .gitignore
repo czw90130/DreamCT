@@ -6,3 +6,4 @@ model_stabilityai-stable-diffusion-2-inpainting/
 *.npz
 *.Identifier
 testdata/*
+.ipynb_checkpoints/

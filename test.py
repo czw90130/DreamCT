@@ -75,35 +75,39 @@ if __name__ == "__main__":
     # ct_nifti_shape = ct['meta']['nifti_shape']
     # num = 10
     
-    slice, mask, properties = encoder.to_slice('sag_slices', 50, slice_size=512, crop=0, mask_edge=20, randomize_sentence=False, random_cat=False)
-    mask = mask.unsqueeze(0)
-    # 应用遮罩生成被遮挡的图像版本
-    before_img = slice[:3].permute(1,2,0).cpu().numpy()
-    masked_img = slice[:3] * (mask < 0.5)  # 反向掩码
-    # 添加标记
-    masked_img[1]= slice[3]
-    masked_img[2] = slice[3]
+    image_buff = []
+    for i in tqdm(range(0,70)):
+        slice, mask, properties = encoder.to_slice('sag_slices', i, slice_size=512, crop=0, mask_edge=20, randomize_sentence=False, random_cat=False)
+        mask = mask.unsqueeze(0)
+        # 应用遮罩生成被遮挡的图像版本
+        before_img = slice[:3].permute(1,2,0).cpu().numpy()
+        masked_img = slice[:3] * (mask < 0.5)  # 反向掩码
+        # 添加标记
+        masked_img[1]= slice[3]
+        masked_img[2] = slice[3]
 
 
-    
-    with autocast():
-        image = pipe(prompt=properties['sentence'],
-                    masked_img=masked_img,
-                    mask=mask,
-                    strength=1.0,
-                    num_inference_steps=args.n_steps,
-                    guidance_scale=7.5,
-                    s1=args.s1,
-                    s2=args.s2,
-                    callback_steps=1,
-                )
+        
+        with autocast():
+            image = pipe(prompt=properties['sentence'],
+                        masked_img=masked_img,
+                        mask=mask,
+                        strength=1.0,
+                        num_inference_steps=args.n_steps,
+                        guidance_scale=7.5,
+                        s1=args.s1,
+                        s2=args.s2,
+                        callback_steps=1,
+                    )
 
-    middle_img = masked_img.permute(1,2,0).cpu().numpy()
-    # imageio.imsave(os.path.join(save_folder, 'before_image.png'), before_img)
-    after_img = image[0].permute(1,2,0).cpu().numpy()
-    combine_image = np.concatenate((before_img, middle_img, after_img), axis=1)
+        middle_img = masked_img.permute(1,2,0).cpu().numpy()
+        # imageio.imsave(os.path.join(save_folder, 'before_image.png'), before_img)
+        after_img = image[0].permute(1,2,0).cpu().numpy()
+        combine_image = np.concatenate((before_img, middle_img, after_img), axis=1)
+        combine_image = ((combine_image + 1) / 2 * 255).astype(np.uint8)
+        image_buff.append(combine_image)
     # save image
-    imageio.imsave(os.path.join(save_folder, 'combine_image.png'), combine_image)
+    imageio.mimsave(os.path.join(save_folder, 'concatenated.gif'), image_buff, fps=2)
     
     
     
