@@ -57,9 +57,6 @@ def main(args):
     vae = getLatent_model(args.pretrained_model_name_or_path)
 
     unet = get_unet3d(args.pretrained_model_name_or_path)
-    if args.load_2d_weights:
-        unet2d = get_unet(args.pretrained_model_name_or_path)
-        convert_2d_to_3d_unet(unet2d, unet)
 
     vae.requires_grad_(False)
     vae_trainable_params = []
@@ -80,6 +77,8 @@ def main(args):
         )
 
     optimizer_class = torch.optim.AdamW
+    # import bitsandbytes as bnb
+    # optimizer_class = bnb.optim.AdamW8bit
 
     params_to_optimize = (
         itertools.chain(unet.parameters(), vae_trainable_params)
@@ -121,12 +120,14 @@ def main(args):
     )
         
     weight_dtype = torch.float32
+    # weight_dtype = torch.bfloat16
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
     vae.to(accelerator.device, dtype=weight_dtype)
+    unet.to(accelerator.device, dtype=weight_dtype)
 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -182,14 +183,14 @@ def main(args):
         for batch in train_dataloader:
             with accelerator.accumulate(unet):
                 # 分离输入帧和目标帧
-                frames = batch[0]  # (batch_size, channel, frame_num, height, width)
-                masks = batch[1]   # (batch_size, frame_num, height, width)
+                frames = batch[0]  # (batch_size, frame_num, channel, height, width)
+                masks = batch[1]  # (batch_size, frame_num, height, width)
                 properties = batch[2]
-
-                target_frames = frames[:, :3]
-                masked_frame = target_frames * (masks < 0.5)  # 反向掩码
-                masked_frame[:, :, 1] = frames[:, 3]  # 添加标记
-                masked_frame[:, :, 2] = frames[:, 3]  # 添加标记
+                target_frames = frames[:, :, :3]
+                
+                masked_frame = target_frames * (masks.unsqueeze(2).repeat(1, 1, 3, 1, 1) < 0.5)  # 反向掩码
+                masked_frame[:, :, 1] = frames[:, :, 3]  # 添加标记
+                masked_frame[:, :, 2] = frames[:, :, 3]  # 添加标记
 
                 target_texts = properties['sentence']
                 
@@ -206,28 +207,32 @@ def main(args):
                     masked_latent = masked_latent * 0.18215
                     masked_latents.append(masked_latent)
                 
-                target_latents = torch.stack(target_latents, dim=1)
-                masked_latents = torch.stack(masked_latents, dim=1)
+                target_latents = torch.stack(target_latents, dim=1).permute(0,2,1,3,4)
+                masked_latents = torch.stack(masked_latents, dim=1).permute(0,2,1,3,4)
+                
                 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(target_latents)
                 bsz = target_latents.shape[0]
 
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device, dtype=weight_dtype)
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
 
+                h, w = noisy_latents.shape[-2:]
+                masks = F.interpolate(masks, size=(h,w)).to(dtype=weight_dtype)
+
                 # Prepare input latents and additional info
-                input_latents = torch.cat([noisy_latents, masks.unsqueeze(1), masked_latents], dim=2)
+                input_latents = torch.cat([noisy_latents, masks.unsqueeze(1), masked_latents], dim=1).to(dtype=weight_dtype)
                 
                 # 编码文字
                 input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
                 input_ids = input_ids.to(target_latents.device)
-                clip_hidden_states = text_encoder(input_ids).last_hidden_state
+                clip_hidden_states = text_encoder(input_ids).last_hidden_state.to(dtype=weight_dtype)
 
                 # Predict the noise residual
                 model_pred = unet(input_latents, timesteps, clip_hidden_states).sample

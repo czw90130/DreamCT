@@ -96,7 +96,7 @@ def get_add_unet(pretrained_model_name_or_path, revision=None, add_channels=1):
 def get_unet3d(pretrained_model_name_or_path, revision=None):
     print("Loading UNet3D")
     # 判断是否是自建模型
-    load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet3d", "unet3d.pth"))
+    load_pth = os.path.exists(os.path.join(pretrained_model_name_or_path, "unet3d", "unet.pth"))
     if load_pth:
         # 加载json文件
         with open(os.path.join(pretrained_model_name_or_path, "unet3d", "config.json"), "r") as f:
@@ -104,7 +104,7 @@ def get_unet3d(pretrained_model_name_or_path, revision=None):
         # 初始化模型结构
         unet = UNet3DConditionModel.from_config(config)
         # 加载预训练模型
-        unet_chkpt = os.path.join(pretrained_model_name_or_path, "unet3d", "unet3d.pth")
+        unet_chkpt = os.path.join(pretrained_model_name_or_path, "unet3d", "unet.pth")
         unet_state_dict = torch.load(unet_chkpt, map_location="cpu")
         new_state_dict = OrderedDict()
         for k, v in unet_state_dict.items():

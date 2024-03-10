@@ -21,7 +21,7 @@ def parse_args(input_args=None):
     parser.add_argument('--num_frames', default=8, type=int, help="Which epoch to start training at")
     parser.add_argument('--dropout_rate', default=0.2, type=float, help="Percent of training samples to remove conditioning info.")
     parser.add_argument("--train_decoder", action='store_true', help="Whether or not to train the VAE decoder with an additional L1-Loss.")
-    parser.add_argument("--preframe_num", type=int, default=3, help="Number of frames before the frame for prediction.")
+    parser.add_argument("--frame_num", type=int, default=32, help="Number of frames before the frame for prediction.")
     
     parser.add_argument(
         "--with_prior_preservation",
