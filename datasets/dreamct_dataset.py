@@ -35,7 +35,7 @@ class CTFramesDataset(Dataset, NIfTIEncoder):
         self,
         ct_data_root,
         slice_size=512, # 切片重采样大小
-        frame_num=3+1, # 读取的切片数(3帧预测1帧)
+        frame_num=8, # 读取的切片数
         skip_rate= 0.5, # 跳过的概率
         train=True,
         cache_size=4,  # 缓存大小
@@ -95,7 +95,10 @@ class CTFramesDataset(Dataset, NIfTIEncoder):
         ct_npz, plane, idx = self.data_idx_buffer[idx]
         ct = self.load_data(ct_npz)
         
-        return self.to_slice(plane, idx, ct=ct, slice_size=self.slice_size)
+        if self.frame_num is None or self.frame_num == 1:
+            return self.to_slice(plane, idx, ct=ct, slice_size=self.slice_size)
+        else:
+            return self.to_frames(plane, idx, ct=ct, slice_size=self.slice_size, sample_num=self.frame_num)
     
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
