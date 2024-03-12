@@ -76,7 +76,7 @@ if __name__ == "__main__":
     # num = 10
     
     image_buff = []
-    for i in tqdm(range(0,70)):
+    for i in tqdm(range(0,20)):
         slice, mask, properties = encoder.to_slice('sag_slices', i, slice_size=512, crop=0, mask_edge=20, randomize_sentence=False, random_cat=False)
         mask = mask.unsqueeze(0)
         # 应用遮罩生成被遮挡的图像版本

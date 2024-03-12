@@ -460,47 +460,47 @@ class StableDiffusionCT2CTPipeline(DiffusionPipeline):
             s1_vals, s2_vals = [s1], [s2]
 
         # 10. Denoising loop
-        copy_latents = latents.clone()
-        for s1 in s1_vals:
-            for s2 in s2_vals:
-                latents = copy_latents.clone()
-                num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-                # with self.progress_bar(total=num_inference_steps) as progress_bar:
-                for i, t in enumerate(timesteps):
-                    t = t.cuda()
+        # copy_latents = latents.clone()
+        # for s1 in s1_vals:
+        #     for s2 in s2_vals:
+        # latents = copy_latents.clone()
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        # with self.progress_bar(total=num_inference_steps) as progress_bar:
+        for i, t in enumerate(timesteps):
+            t = t.cuda()
 
-                    # expand the latents if we are doing classifier free guidance
-                    # 如果我们正在进行无分类器指导，则扩展潜变量
-                    latent_model_input = self.scheduler.scale_model_input(latents, t)
+            # expand the latents if we are doing classifier free guidance
+            # 如果我们正在进行无分类器指导，则扩展潜变量
+            latent_model_input = self.scheduler.scale_model_input(latents, t)
 
-                    # Add spine_marker to noisy latents
-                    latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(mask, (h,w)).cuda(), masked_latents.cuda()), 1)
+            # Add spine_marker to noisy latents
+            latent_model_input = torch.cat((latent_model_input.cuda(), F.interpolate(mask, (h,w)).cuda(), masked_latents.cuda()), 1)
 
-                    # predict the noise residual
-                    noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample
+            # predict the noise residual
+            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=embeddings.cuda()).sample
 
-                    # compute the previous noisy sample x_t -> x_t-1
-                    latents = self.scheduler.step(noise_pred.cuda(), t, latents.cuda(), **extra_step_kwargs).prev_sample
+            # compute the previous noisy sample x_t -> x_t-1
+            latents = self.scheduler.step(noise_pred.cuda(), t, latents.cuda(), **extra_step_kwargs).prev_sample
 
-                    # call the callback, if provided
-                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                        # progress_bar.update()
-                        if callback is not None and i % callback_steps == 0:
-                            callback(i, t, latents)
+            # call the callback, if provided
+            # if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+            #     # progress_bar.update()
+            #     if callback is not None and i % callback_steps == 0:
+            #         callback(i, t, latents)
 
-                # 11. Post-processing
-                latents = latents[:,:4, :, :].cuda() #.float()
-                image = self.decode_latents(latents)
+        # 11. Post-processing
+        latents = latents[:,:4, :, :].cuda() #.float()
+        image = self.decode_latents(latents)
 
-                #print(len(image)) # 1
-                #print(image[0].shape) # 640, 512, 3
+        #print(len(image)) # 1
+        #print(image[0].shape) # 640, 512, 3
 
-                # # 13. Convert to PIL
-                # if output_type == "pil":
-                #     image = self.numpy_to_pil(image)
+        # # 13. Convert to PIL
+        # if output_type == "pil":
+        #     image = self.numpy_to_pil(image)
 
-                # if sweep:
-                #     images.append(torchvision.transforms.ToTensor()(image[0]).clone())
+        # if sweep:
+        #     images.append(torchvision.transforms.ToTensor()(image[0]).clone())
 
         # # 13. If sweeping, convert images to grid
         # if sweep:
