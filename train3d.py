@@ -274,18 +274,18 @@ def main(args):
             if global_step % 50 == 0:
                 with torch.no_grad():
                     pred_latents = noisy_latents - model_pred
-                    pred_images = latents2img(pred_latents[:, -1])
+                    pred_images = latents2img(pred_latents[:, :, -1])
                     tgt_latents = noisy_latents - target
-                    tgt_images = latents2img(tgt_latents[:, -1])
+                    tgt_images = latents2img(tgt_latents[:, :, -1])
                     
-                    noise_viz = latents2img(noisy_latents[:, -1])
+                    noise_viz = latents2img(noisy_latents[:, :, -1])
                     
-                    target = inputs2img(target_frames[:, -1])
+                    # target = inputs2img(target_frames[:, :, -1])
                     
                     writer.add_image(f'train/0noise_viz', noise_viz[0], global_step=global_step)
                     writer.add_image(f'train/1pred_img', pred_images[0], global_step=global_step)
                     writer.add_image(f'train/2tgt_img', tgt_images[0], global_step=global_step)
-                    writer.add_image(f'train/3target', target[0], global_step=global_step)
+                    # writer.add_image(f'train/3target', target[0], global_step=global_step)
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

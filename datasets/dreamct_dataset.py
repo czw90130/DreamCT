@@ -45,12 +45,16 @@ class CTFramesDataset(Dataset, NIfTIEncoder):
         self.ct_data_root = Path(ct_data_root)
         self.slice_size = slice_size
         self.train = train
-        self.frame_num = frame_num
+        self.frame_num = frame_num if frame_num is not None else 1
         self.cache_size = cache_size
         self.cache = OrderedDict()  # 使用OrderedDict作为缓存
 
         ct_npzs = list(self.ct_data_root.glob('*.npz'))
         self.data_idx_buffer = []
+        
+        gap = frame_num//4
+        if gap < 1:
+            gap = 1
 
         pbar = tqdm(ct_npzs)
         for ct_npz in pbar:
@@ -65,7 +69,7 @@ class CTFramesDataset(Dataset, NIfTIEncoder):
                     end_idx = ct['meta'][plane+'_num']-frame_num
                 except KeyError:
                     end_idx = ct[plane].shape[0]-frame_num
-                for i in range(0, end_idx):
+                for i in range(0, end_idx, gap):
                     if random.random() < skip_rate:
                         continue
                     sub_idx_buffer.append((ct_npz, plane, i))
@@ -98,7 +102,8 @@ class CTFramesDataset(Dataset, NIfTIEncoder):
         if self.frame_num is None or self.frame_num == 1:
             return self.to_slice(plane, idx, ct=ct, slice_size=self.slice_size)
         else:
-            return self.to_frames(plane, idx, ct=ct, slice_size=self.slice_size, sample_num=self.frame_num)
+            reverse_order = random.random() < 0.5
+            return self.to_frames(plane, idx, ct=ct, slice_size=self.slice_size, reverse_order=reverse_order, sample_num=self.frame_num)
     
 if __name__ == "__main__":
     from torch.utils.data import DataLoader

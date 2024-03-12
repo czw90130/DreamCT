@@ -660,7 +660,7 @@ class NIfTIEncoder(SentenceBuilder):
         
         return slice, mask, properties
     
-    def to_frames(self, plane, start_idx, sample_num, ct=None, slice_size=512, crop=True, mask_edge=None, mask_ext=True, randomize_sentence=True, random_cat=True):
+    def to_frames(self, plane, start_idx, sample_num, ct=None, slice_size=512, reverse_order=False, crop=True, mask_edge=None, mask_ext=True, randomize_sentence=True, random_cat=True):
         if ct is None:
             ct = self.result
         slices = ct[plane]
@@ -679,13 +679,22 @@ class NIfTIEncoder(SentenceBuilder):
         frame = torch.ones((slices[0].shape[-1], sample_num, slice_size, slice_size)) * -1
         mask = torch.zeros((sample_num, slice_size, slice_size))
         
-        if start_idx + sample_num > len(slices):
-            start_idx = len(slices) - sample_num
-            if start_idx < 0:
-                raise ValueError('sample_num is larger than the number of slices')
+        if not reverse_order:
+            if start_idx + sample_num > len(slices):
+                start_idx = len(slices) - sample_num
+                if start_idx < 0:
+                    raise ValueError('sample_num is larger than the number of slices')
+        else:
+            if start_idx - sample_num < 0:
+                start_idx = sample_num
+                if start_idx > len(slices):
+                    raise ValueError('sample_num is larger than the number of slices')
         
         for i in range(sample_num):
-            idx = start_idx + i
+            if not reverse_order:
+                idx = start_idx + i
+            else:
+                idx = start_idx - i
             
             slice = np.asarray(slices[idx])
             slice = torch.from_numpy(slice).to(torch.float32)
