@@ -78,7 +78,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    train_dataset = Sag3DDataset(ct_data_root=args.ct_data_dir, num_frames=1, num_samples_per_npz=1000) # 2D
+    train_dataset = Sag3DDataset(root_dir=args.ct_data_dir, num_frames=1, num_samples_per_npz=1000, output_with_info=False) # 2D
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -166,7 +166,7 @@ def main(args):
         first_batch = True
         for batch in train_dataloader:
             with accelerator.accumulate(vae):
-                slice = batch[:,:,0] # 2D VAE 深度D为1
+                slice = batch['data'][:,:,0].clamp(-1, 1).to(accelerator.device, dtype=weight_dtype) # 2D VAE 深度D为1
                 
                 # Convert images to latent space
                 latents = vae.encode(slice.to(dtype=weight_dtype)).latent_dist.sample()
@@ -176,7 +176,7 @@ def main(args):
                 pred_images = vae.decode(latents).sample
                 pred_images = pred_images.clamp(-1, 1)
 
-                loss = F.mse_loss(pred_images.float(), batch['target_frame'].clamp(-1, 1).float(), reduction="mean")
+                loss = F.mse_loss(pred_images, slice, reduction="mean")
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
