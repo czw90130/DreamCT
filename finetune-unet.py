@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 import torch.nn as nn
 import numpy as np
 
+from diffusers import DDPMScheduler
 from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
 
@@ -30,27 +31,26 @@ def main(args):
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     # Load models and create wrapper for stable diffusion
-    vae = getLatent_model(args.pretrained_model_name_or_path)
-    # Move vae to gpu
-    vae.to(device, dtype=weight_dtype)  
+    # Load text encoder
+    text_encoder, tokenizer = load_text_encoder(args.pretrained_model_name_or_path)
+    text_encoder.requires_grad_(False)
 
-    vae.requires_grad_(True)
-#     vae_trainable_params = [] 
-#     for name, param in vae.named_parameters():
-#         if 'decoder' in name:
-#             param.requires_grad = True
-#             vae_trainable_params.append(param)
-     
-#     print(f"VAE total params = {len(list(vae.named_parameters()))}, trainable params = {len(vae_trainable_params)}")
+    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+    
+    # Load VAE
+    vae = getLatent_model(args.pretrained_model_name_or_path).to(device, dtype=weight_dtype)
+    # Load unet
+    unet = get_unet(args.pretrained_model_name_or_path).to(device, dtype=weight_dtype)
+
+    unet.requires_grad_(True)
     
     if args.gradient_checkpointing:
-        vae.gradient_checkpointing_enable()
+        unet.gradient_checkpointing_enable()
 
     optimizer_class = torch.optim.AdamW
 
     params_to_optimize = (
-        # itertools.chain(vae_trainable_params)
-        itertools.chain(vae.parameters())
+        itertools.chain(unet.parameters())
     )
 
     optimizer = optimizer_class(
@@ -61,7 +61,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    train_dataset = Sag3DDataset(root_dir=args.ct_data_dir,target_size=512, num_frames=1, num_samples_per_npz=2000, output_with_info=False) # 2D
+    train_dataset = Sag3DDataset(root_dir=args.ct_data_dir, target_size=512, num_frames=1, output_mode='random', num_samples_per_npz=2000, output_with_info=True) # 2D
 
     train_dataloader = torch.utils.data.DataLoader(  
         train_dataset,
@@ -105,26 +105,65 @@ def main(args):
 
     global_step = 0
 
+    def latents2img(latents):
+        latents = 1 / 0.18215 * latents
+        images = vae.decode(latents).sample
+        images = (images / 2 + 0.5).clamp(0, 1)
+        images = images.detach().cpu().numpy()
+        images = (images * 255).round().astype("uint8")
+        return images
+
     def inputs2img(input):
         target_images = (input / 2 + 0.5).clamp(0, 1)  
         target_images = target_images.detach().cpu().numpy()
         target_images = (target_images * 255).round().astype("uint8")
         return target_images
-    torch.autograd.set_detect_anomaly(True)
+    
     for epoch in range(args.epoch, args.num_train_epochs):
-        vae.train()
+        unet.train()
         for batch in train_dataloader:
             slice = batch['data'][:,:,0].clamp(-1, 1).to(device, dtype=weight_dtype) # 2D VAE 深度D为1
+            properties = batch['info']
+
+            target_texts = properties['sentence']
+
             
             # Convert images to latent space
             latents = vae.encode(slice.to(dtype=weight_dtype)).latent_dist.sample()  
             latents = latents * 0.18215
 
-            latents = 1 / 0.18215 * latents            
-            pred_images = vae.decode(latents).sample
-            pred_images = pred_images.clamp(-1, 1)
+            # Sample noise that we'll add to the latents
+            noise = torch.randn_like(latents)
+            bsz = latents.shape[0]
 
-            loss = F.mse_loss(pred_images, slice, reduction="mean")
+            # Sample a random timestep for each image
+            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device)
+            timesteps = timesteps.long()
+
+            # Add noise to the latents according to the noise magnitude at each timestep
+            # (this is the forward diffusion process)
+            # print("latents shape = ", latents.shape)
+            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+            # print("noisy_latents shape = ", noisy_latents.shape)
+
+            # 编码文字
+            input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
+            input_ids = input_ids.to(latents.device)
+            clip_hidden_states = text_encoder(input_ids).last_hidden_state
+            #print("clip states shape = ", clip_hidden_states.shape)
+
+            # Predict the noise residual
+            noise_pred = unet(noisy_latents, timesteps, clip_hidden_states).sample
+
+            # Get the target for loss depending on the prediction type
+            if noise_scheduler.config.prediction_type == "epsilon":
+                target = noise
+            elif noise_scheduler.config.prediction_type == "v_prediction":
+                target = noise_scheduler.get_velocity(latents, noise, timesteps)
+            else:
+                raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+            loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
  
             loss.backward()
                         
@@ -134,11 +173,18 @@ def main(args):
 
             if global_step % 50 == 0:
                 with torch.no_grad():
-                    pred_images = inputs2img(pred_images) 
-                    target = inputs2img(slice)
-                    viz = np.concatenate([pred_images[0], target[0]], axis=2)  
-                    writer.add_image(f'train/pred_img', viz, global_step=global_step)
-
+                    origin_images = inputs2img(slice)
+                    noise_viz = latents2img(noisy_latents)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    target_latents = noise_scheduler.step(target, timesteps, noisy_latents)["prev_sample"]
+                    target_images = latents2img(target_latents)
+                    pred_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents)["prev_sample"]
+                    pred_images = latents2img(pred_latents) 
+                    writer.add_image(f'train/origin_image', origin_images[0], global_step=global_step)
+                    writer.add_image(f'train/noise_image', noise_viz[0], global_step=global_step)
+                    writer.add_image(f'train/target_image', target_images[0], global_step=global_step)
+                    writer.add_image(f'train/pred_image', pred_images[0], global_step=global_step)
+                    
             logs = {"loss": loss.item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import SimpleITK as sitk
 import random
+from tqdm import tqdm
 
 class SentenceBuilder:
     def age_description(self, age, digit=False):
@@ -48,25 +49,6 @@ class SentenceBuilder:
         
         return mapping.get(plane, 'unknown')
 
-    def spine_full_name(self, spine, short=False):
-        if short:
-            return spine
-        spine_mapping = {
-            'C': 'Cervical',
-            'T': 'Thoracic',
-            'L': 'Lumbar',
-            'S': 'Sacrum',
-        }
-        try:
-            tag = spine[0]
-            name = spine_mapping[tag]
-            if spine[1] == '0':
-                return name
-            else:
-                return name + '-' + spine[1:]
-        except:
-            return spine
-
     def list_to_natural_language(self, lst):
         if not lst:
             return 'none'
@@ -84,19 +66,17 @@ class SentenceBuilder:
     def dict_to_sentence(self, d, randomize=True):
         if randomize:
             age_digit = random.choice([True, False])
-            short_spine = random.choice([True, False])
             short_plane = random.choice([True, False])
         else:
             age_digit = False
-            short_spine = False
             short_plane = False
         
         parts = {
             'age': self.age_description(d['age'],digit=age_digit) if 'age' in d else "",
             'gender': self.gender_description(d['gender']) if 'gender' in d else "",
             'plane': self.plane_full_name(d['plane'], short=short_plane) if 'plane' in d else "",
-            'spine_list': self.list_to_natural_language([self.spine_full_name(spine, short=short_spine) for spine in d['spines'].split('|')]) if 'spines' in d else "",
             'order': self.order_description(d['positive_order']),
+            'mode': d.get('mode', 'unknown')
         }
         
         if not randomize:
@@ -107,30 +87,34 @@ class SentenceBuilder:
             return output[:-2]
 
         templates = [
-            f"{parts['age']} {parts['gender']} patient has observations {parts['order']} in the {parts['plane']} plane, including {parts['spine_list']}.",
-            f"In the {parts['plane']} plane {parts['order']}, the {parts['gender']} patient of {d.get('age', 'unknown-age')}-years shows the following spines: {parts['spine_list']}.",
-            f"For {parts['age']} {parts['gender']}, the CT scan in the {parts['plane']} plane {parts['order']} reveals {parts['spine_list']}.",
-            f"Observations for {parts['age']} {parts['gender']} {parts['order']}: {parts['spine_list']} in the {parts['plane']} plane.",
-            f"{parts['age']} {parts['gender']} shows {parts['spine_list']} on {parts['plane']} plane imaging {parts['order']}.",
-            f"{parts['plane'].capitalize()} plane analysis {parts['order']} reveals {parts['spine_list']} for this {parts['age']} {parts['gender']}.",
-            f"CT findings: {parts['spine_list']} in the {parts['plane']} plane {parts['order']} for {parts['age']} {parts['gender']}.",
-            f"Diagnosis for {parts['age']} {parts['gender']}: {parts['spine_list']}, as seen in the {parts['plane']} plane.",
-            f"{parts['plane'].capitalize()} plane imaging {parts['order']} {('reveals ' + parts['spine_list']) if parts['spine_list'] else 'analysis'} for {(parts['age'] + ' ') if parts['age'] else ''}{parts['gender']} patient.",
-            f"Patient details: {(', '.join(filter(None, [parts['age'], parts['gender'], parts['spine_list']])) + ',') if any([parts['age'], parts['gender'], parts['spine_list']]) else 'Not fully specified'}, observed in {parts['plane']} plane {parts['order']}.",
-            f"{(parts['age'] + ' ') if parts['age'] else ''}{parts['gender']} with findings in the {parts['plane']} plane {parts['order']}: {parts['spine_list']}.",
-            f"{('Findings for ' + parts['age'] + ' ') if parts['age'] else ''}{parts['gender']}: {parts['spine_list']} in the {parts['plane']} plane {parts['order']}.",
-            f"CT scan {('in ' + parts['plane'] + ' plane ') if parts['plane'] else ''}{parts['order']} shows {parts['spine_list']} for {(parts['age'] + ' ') if parts['age'] else ''}{parts['gender']}.",
-            f"Analysis{(': ' + parts['plane'] + ' plane, ') if parts['plane'] else ': '} {parts['order']} {parts['spine_list']} {'for ' + parts['age'] + ' ' + parts['gender'] if parts['age'] and parts['gender'] else ('for ' + (parts['age'] or parts['gender']))}.",
-            f"{parts['age']} {parts['gender']}, {parts['plane']}: {parts['spine_list']}.",
-            f"{parts['gender']} {parts['age']}, {parts['spine_list']} in {parts['plane']} {parts['order']}.",
-            f"{parts['plane']} {parts['order']} - {parts['spine_list']}, {parts['age']} {parts['gender']}.",
-            f"{parts['age']} {parts['gender']} {parts['plane']}: {parts['spine_list']}.",
-            f"{parts['spine_list']} ({parts['plane']}, {parts['age']} {parts['gender']}) {parts['order']}.",
-            f"{parts['age']} {parts['gender']}, {parts['plane']} plane {parts['order']}.",
-            f"{parts['gender']} patient, {parts['spine_list']} {parts['order']}.",
-            f"{parts['plane']} plane: {parts['spine_list']}.",
-            f"{parts['age']} {parts['gender']}: {parts['spine_list']} {parts['order']}.",
-            f"{parts['spine_list']}, {parts['plane']} plane {parts['order']}.",
+            f"{parts['age']} {parts['gender']} patient has {parts['mode']} observations {parts['order']} in the {parts['plane']} plane.",
+            f"In the {parts['plane']} plane {parts['order']}, the {parts['gender']} patient of {d.get('age', 'unknown-age')}-years has {parts['mode']}.",
+            f"For {parts['age']} {parts['gender']}, the {parts['mode']} scan in the {parts['plane']} plane {parts['order']}.",
+            f"{parts['mode']} observations for {parts['age']} {parts['gender']} {parts['order']} in the {parts['plane']} plane.",
+            f"{parts['age']} {parts['gender']} on {parts['plane']} plane {parts['mode']} imaging {parts['order']}.",
+            f"{parts['plane']} plane {parts['mode']} analysis {parts['order']} for this {parts['age']} {parts['gender']}.",
+            f"{parts['mode']} findings in the {parts['plane']} plane {parts['order']} for {parts['age']} {parts['gender']}.",
+            f"{parts['mode']} diagnosis for {parts['age']} {parts['gender']}, as seen in the {parts['plane']} plane.",
+            f"{parts['plane']} plane {parts['mode']} imaging {parts['order']} analysis for {(parts['age'] + ' ') if parts['age'] else ''}{parts['gender']} patient.",
+            f"Patient details: {(', '.join(filter(None, [parts['age'], parts['gender']])) + ',') if any([parts['age'], parts['gender']]) else 'Not fully specified'}, {parts['mode']} observed in {parts['plane']} plane {parts['order']}.",
+            f"{(parts['age'] + ' ') if parts['age'] else ''}{parts['gender']} with {parts['mode']} findings in the {parts['plane']} plane {parts['order']}.",
+            f"{('Findings for ' + parts['age'] + ' ') if parts['age'] else ''}{parts['gender']} in the {parts['plane']} plane {parts['order']} using {parts['mode']}.",
+            f"{parts['mode']} scan {('in ' + parts['plane'] + ' plane ') if parts['plane'] else ''}{parts['order']} for {(parts['age'] + ' ') if parts['age'] else ''}{parts['gender']}.",
+            f"{parts['mode']} analysis{(': ' + parts['plane'] + ' plane, ') if parts['plane'] else ': '} {parts['order']} {'for ' + parts['age'] + ' ' + parts['gender'] if parts['age'] and parts['gender'] else ('for ' + (parts['age'] or parts['gender']))}.",
+            f"{parts['age']} {parts['gender']}, {parts['plane']} {parts['mode']}.",
+            f"{parts['gender']} {parts['age']}, {parts['mode']} in {parts['plane']} {parts['order']}.",
+            f"{parts['plane']} {parts['order']} - {parts['mode']}, {parts['age']} {parts['gender']}.",
+            f"{parts['age']} {parts['gender']} {parts['plane']} {parts['mode']}.",
+            f"{parts['mode']} ({parts['plane']}, {parts['age']} {parts['gender']}) {parts['order']}.",
+            f"{parts['age']} {parts['gender']}, {parts['plane']} plane {parts['mode']} {parts['order']}.",
+            f"{parts['gender']} patient, {parts['mode']} {parts['order']}.",
+            f"{parts['plane']} plane {parts['mode']}.",
+            f"{parts['age']} {parts['gender']}: {parts['mode']} {parts['order']}.",
+            f"{parts['mode']}, {parts['plane']} plane {parts['order']}.",
+            f"{parts['mode']}, {parts['plane']}, {parts['order']}.",
+            f"{parts['mode']}, {parts['plane']}, {parts['order']}.",
+            f"{parts['mode']}, {parts['plane']}",
+            f"{parts['mode']}, {parts['plane']}",
             ""
         ]
 
@@ -138,6 +122,32 @@ class SentenceBuilder:
         return random.choice(templates).replace("  ", " ").replace(",,", ",").strip()
     
 class Sag3DEncoder(SentenceBuilder):
+    spine_color = {
+        'C1': [206, 210, 235],
+        'C2': [221, 200, 220],
+        'C3': [251, 190, 190],
+        'C4': [255, 190, 190],
+        'C5': [255, 190, 190],
+        'C6': [255, 190, 190],
+        'C7': [255, 190, 190],
+        'T1': [205, 255, 190],
+        'T2': [190, 255, 190],
+        'T3': [190, 255, 190],
+        'T4': [190, 255, 190],
+        'T5': [190, 255, 190],
+        'T6': [190, 255, 190],
+        'T7': [190, 255, 190],
+        'T8': [190, 255, 190],
+        'T9': [190, 255, 190],
+        'T10': [190, 255, 190],
+        'T11': [190, 255, 190],
+        'T12': [190, 255, 190],
+        'L1': [240, 190, 235],
+        'L2': [230, 190, 250],
+        'L3': [210, 190, 255],
+        'L4': [190, 190, 255],
+        'L5': [190, 190, 255],
+    }
     organ_color = {
         'skin': [228, 200, 166],
         'bone': [255, 255, 255],
@@ -174,6 +184,7 @@ class Sag3DEncoder(SentenceBuilder):
     }
 
     def __init__(self, hu_range=(-1000, 3000)):
+        
         self.hu_range = hu_range
         self.mat = None
         self.info = None
@@ -236,7 +247,7 @@ class Sag3DEncoder(SentenceBuilder):
         rst = (max_val - min_val) * (data - data_min) / (data_max - data_min) + min_val
         return rst.clip(min_val, max_val)
 
-    def to_frames(self, axis, start_index, data=None, crop=None, target_size=256, num_frames=32):
+    def to_frames(self, axis, start_index, data=None, crop=None, target_size=256, num_frames=32, positive_order=True):
         if data is None:
             data = self.mat
         if data is None:
@@ -250,6 +261,9 @@ class Sag3DEncoder(SentenceBuilder):
             clip_data = data[:,start_index:start_index+num_frames,:,:]
         else:
             clip_data = data[:,:,start_index:start_index+num_frames,:]
+
+        if not positive_order:
+            clip_data = clip_data.flip(axis)
 
         frames = []
         for i in range(num_frames):
@@ -297,7 +311,7 @@ class Sag3DDataset(torch.utils.data.Dataset):
     
     def _generate_data_list(self):
         data_list = []
-        for npz_file in self.npz_files:
+        for npz_file in tqdm(self.npz_files):
             mat,_  = self.encoder.load_npz(npz_file)
             for _ in range(self.num_samples_per_npz):
                 axis = random.choice(self.axes)
@@ -310,30 +324,59 @@ class Sag3DDataset(torch.utils.data.Dataset):
                     start_index = random.randint(0, max_start_index)
 
                 crop = random.choice([True, True, True, False])
-                data_list.append({"npz_file": npz_file, "axis": axis, "start_index": start_index, "crop": crop})
+                positive_order = random.choice([True, False])
+                data_list.append({"npz_file": npz_file, "axis": axis, "start_index": start_index, "crop": crop, "positive_order": positive_order})
         return data_list
+    
+    def _axis2plane(self, axis):
+        if axis == 0:
+            return 'sag'
+        elif axis == 1:
+            return 'cor'
+        else:
+            return 'hor'
 
     def __len__(self):
         return len(self.data_list)
 
     def __getitem__(self, idx):
         data_info = self.data_list[idx]
-        npz_file, axis, start_index, crop = data_info["npz_file"], data_info["axis"], data_info["start_index"], data_info["crop"]
-
+        npz_file, axis, start_index, crop, positive_order = data_info["npz_file"], data_info["axis"], data_info["start_index"], data_info["crop"], data_info["positive_order"]
+        
         mat, info = self.encoder.load_npz(npz_file)
-        frames = self.encoder.to_frames(axis, start_index, mat, crop, self.target_size, self.num_frames)
-        if self.output_mode == 'all':
-            pass
-        elif self.output_mode == 'segment':
+        frames = self.encoder.to_frames(axis, start_index, mat, crop, self.target_size, self.num_frames, positive_order)
+        
+        omode = self.output_mode
+        if omode == 'random':
+            omode = random.choice(['segment', 'CT', 'outline'])
+
+        if omode == 'segment':
             frames = frames[..., :3]
-        elif self.output_mode == 'ctvalue':
+            info['mode'] = 'segment'
+        elif omode == 'CT':
             frames = frames[..., 3:6]
-        elif self.output_mode == 'smpl':
+            info['mode'] = 'CT'
+        elif omode == 'outline':
             frames = frames[..., 6:]
+            info['mode'] = 'outline'
         else:
-            frames = random.choice([frames[..., :3], frames[..., 3:6], frames[..., 6:]])
+            info['mode'] = '|'.join(['segment', 'CT', 'outline'])
+            
         output = {'data':frames.permute(3, 0, 1, 2)}
         if self.output_with_info:
+            info['axis'] = axis
+            info['positive_order'] = positive_order
+            info['plane'] = self._axis2plane(axis)
+
+            # # 获取存在的脊柱tag
+            # spine_tags = []
+            # for key,color in self.encoder.spine_color.items():
+            #     color = 2 * torch.tensor(color) / 255 - 1
+            #     if torch.any(frames[..., :3] == color):
+            #         spine_tags.append(key)
+            # info['spines'] = spine_tags
+            
+            info['sentence'] = self.encoder.dict_to_sentence(info)
             output['info'] = info
         return output
     
@@ -346,11 +389,15 @@ if __name__ == "__main__":
     dataset = Sag3DDataset(npz_path)
     print('dataset:', len(dataset))
     frames = dataset[0]
+    print('sentence:', frames['info']['sentence'])
+    print('mode:', frames['info']['mode'])
+    print('plane:', frames['info']['plane'])
+    # print('spines:', frames['info']['spines'])
 
     gif_frames = []
     # 逐帧处理数据
-    for frame in frames:
-        frame = frame.numpy()
+    data = frames['data'].permute(1,2,3,0).numpy()
+    for frame in data:
         # # 将归一化的数据缩放到[0, 255]的范围内,并转换为uint8类型
         # rgb_data = ((frame[..., :3] + 1) * 127.5).astype(np.uint8)
         # ct_data = ((frame[..., 3:6] + 1) * 127.5).astype(np.uint8)
@@ -365,7 +412,3 @@ if __name__ == "__main__":
 
     # 使用imageio创建GIF图像
     imageio.mimsave(out_gif_path, gif_frames, fps=3)
-
-        
-    
-        
