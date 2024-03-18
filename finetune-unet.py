@@ -137,7 +137,7 @@ def main(args):
             bsz = latents.shape[0]
 
             # Sample a random timestep for each image
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=target_latents.device)
+            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
             timesteps = timesteps.long()
 
             # Add noise to the latents according to the noise magnitude at each timestep
@@ -150,7 +150,7 @@ def main(args):
             input_ids = tokenizer(target_texts, return_tensors="pt", padding=True, truncation=True).input_ids
             input_ids = input_ids.to(latents.device)
             clip_hidden_states = text_encoder(input_ids).last_hidden_state
-            #print("clip states shape = ", clip_hidden_states.shape)
+            # print("clip states shape = ", clip_hidden_states.shape)
 
             # Predict the noise residual
             noise_pred = unet(noisy_latents, timesteps, clip_hidden_states).sample
@@ -175,11 +175,8 @@ def main(args):
                 with torch.no_grad():
                     origin_images = inputs2img(slice)
                     noise_viz = latents2img(noisy_latents)
-                    # compute the previous noisy sample x_t -> x_t-1
-                    target_latents = noise_scheduler.step(target, timesteps, noisy_latents)["prev_sample"]
-                    target_images = latents2img(target_latents)
-                    pred_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents)["prev_sample"]
-                    pred_images = latents2img(pred_latents) 
+                    target_images = latents2img(noisy_latents-target)
+                    pred_images = latents2img(noisy_latents-noise_pred) 
                     writer.add_image(f'train/origin_image', origin_images[0], global_step=global_step)
                     writer.add_image(f'train/noise_image', noise_viz[0], global_step=global_step)
                     writer.add_image(f'train/target_image', target_images[0], global_step=global_step)
@@ -199,8 +196,8 @@ def main(args):
                 checkpoint_path = os.path.join(args.output_dir, f'checkpoint-{epoch}') 
                 os.makedirs(checkpoint_path, exist_ok=True)
 
-                vae_path = os.path.join(checkpoint_path,'vae.pth')  
-                torch.save(vae.state_dict(), vae_path)
+                unet_path = os.path.join(checkpoint_path,'unet.pth')  
+                torch.save(unet.state_dict(), unet_path)
 
 if __name__ == "__main__":
     args = parse_args()
